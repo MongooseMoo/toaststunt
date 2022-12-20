@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.2)
+cmake_minimum_required(VERSION 3.11)
 set(VERSION_MAJOR 2)
 set(VERSION_MINOR 7)
 set(VERSION_RELEASE 0)
@@ -158,6 +158,7 @@ find_package(CURL)
 find_package(ASPELL)
 find_package(SQLite3)
 find_package(OpenSSL)
+find_package(Iconv)
 
 # Millions of source files
 set(src_CSRCS
@@ -229,6 +230,7 @@ set(src_CXXSRCS
     src/sym_table.cc
     src/system.cc
     src/tasks.cc
+    src/text_encoding.cc
     src/timers.cc
     src/unparse.cc
     src/utils.cc

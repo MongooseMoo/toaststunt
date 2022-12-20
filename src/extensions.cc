@@ -35,6 +35,7 @@
 #include "bf_register.h"
 #include "functions.h"
 #include "db_tune.h"
+#include "text_encoding.h"
 
 #if EXAMPLE
 
@@ -45,7 +46,8 @@
 #include "storage.h"
 #include "tasks.h"
 
-typedef struct stdin_waiter {
+typedef struct stdin_waiter
+{
     struct stdin_waiter *next;
     vm the_vm;
 } stdin_waiter;
@@ -57,14 +59,16 @@ stdin_enumerator(task_closure closure, void *data)
 {
     stdin_waiter **ww;
 
-    for (ww = &waiters; *ww; ww = &((*ww)->next)) {
+    for (ww = &waiters; *ww; ww = &((*ww)->next))
+    {
         stdin_waiter *w = *ww;
         const char *status = (w->the_vm->task_id & 1
-                              ? "stdin-waiting"
-                              : "stdin-weighting");
-        task_enum_action tea = (*closure) (w->the_vm, status, data);
+                                  ? "stdin-waiting"
+                                  : "stdin-weighting");
+        task_enum_action tea = (*closure)(w->the_vm, status, data);
 
-        if (tea == TEA_KILL) {
+        if (tea == TEA_KILL)
+        {
             *ww = w->next;
             myfree(w, M_TASK);
             if (!waiters)
@@ -88,7 +92,8 @@ stdin_readable(int fd, void *data)
     if (data != &waiters)
         panic("STDIN_READABLE: Bad data!");
 
-    if (!waiters) {
+    if (!waiters)
+    {
         errlog("STDIN_READABLE: Nobody cares!\n");
         return;
     }
@@ -98,10 +103,13 @@ stdin_readable(int fd, void *data)
         if (buffer[--n] == '\n')
             buffer[n] = 'X';
 
-    if (buffer[0] == 'a') {
+    if (buffer[0] == 'a')
+    {
         v.type = TYPE_ERR;
         v.v.err = E_NACC;
-    } else {
+    }
+    else
+    {
         v.type = TYPE_STR;
         v.v.str = str_dup(buffer);
     }
@@ -136,7 +144,7 @@ bf_read_stdin(Var arglist, Byte next, void *vdata, Objid progr)
 
     return make_suspend_pack(stdin_suspender, w);
 }
-#endif              /* EXAMPLE */
+#endif /* EXAMPLE */
 
 #define STUPID_VERB_CACHE 1
 #ifdef STUPID_VERB_CACHE
@@ -149,7 +157,8 @@ bf_verb_cache_stats(Var arglist, Byte next, void *vdata, Objid progr)
 
     free_var(arglist);
 
-    if (!is_wizard(progr)) {
+    if (!is_wizard(progr))
+    {
         return make_error_pack(E_PERM);
     }
     r = db_verb_cache_stats();
@@ -162,7 +171,8 @@ bf_log_cache_stats(Var arglist, Byte next, void *vdata, Objid progr)
 {
     free_var(arglist);
 
-    if (!is_wizard(progr)) {
+    if (!is_wizard(progr))
+    {
         return make_error_pack(E_PERM);
     }
     db_log_cache_stats();
@@ -171,9 +181,7 @@ bf_log_cache_stats(Var arglist, Byte next, void *vdata, Objid progr)
 }
 #endif
 
-
-void
-register_extensions()
+void register_extensions()
 {
 #if EXAMPLE
     register_task_queue(stdin_enumerator);
@@ -183,4 +191,5 @@ register_extensions()
     register_function("log_cache_stats", 0, 0, bf_log_cache_stats);
     register_function("verb_cache_stats", 0, 0, bf_verb_cache_stats);
 #endif
+    register_text_encoding();
 }
