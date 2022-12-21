@@ -131,19 +131,6 @@ static package bf_encode_text(Var arglist, Byte next, void *vdata, Objid progr)
  * Description: Return a list of all supported text encodings from Iconv
  */
 
-static package bf_text_encodings(Var arglist, Byte next, void *vdata, Objid progr)
-{
-    Var r;
-    r.type = TYPE_LIST;
-    r.v.list = new_list(0);
-    for (int i = 0; text_encodings[i]; i++)
-    {
-        r.v.list = listappend(r.v.list, str_dup_to_var(text_encodings[i]));
-    }
-    free_var(arglist);
-    return make_var_pack(r);
-}
-
 void register_text_encoding()
 {
 
