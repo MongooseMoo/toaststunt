@@ -247,6 +247,7 @@ compare_numbers(Var a, Var b)
     return ans;
 }
 
+#ifdef PROMOTE_NUMBERS
 
 #define SIMPLE_BINARY(name, op)                                            \
     Var                                                                    \
@@ -273,8 +274,6 @@ compare_numbers(Var a, Var b)
             {                                                              \
                 ans.type = TYPE_ERR;                                       \
                 ans.v.err = E_TYPE;                                        \
-                free_var(temp_a);                                          \
-                free_var(temp_b);                                          \
                 return ans;                                                \
             }                                                              \
             if (temp_a.type == TYPE_INT && temp_b.type == TYPE_INT)        \
@@ -324,8 +323,6 @@ compare_numbers(Var a, Var b)
                 }                                                          \
             }                                                              \
         }                                                                  \
-        free_var(temp_a);                                                  \
-        free_var(temp_b);                                                  \
         return ans;                                                        \
     }
 
@@ -371,8 +368,6 @@ Var do_modulus(Var a, Var b)
                 ans.v.fnum = result;
             }
 
-            free_var(temp_a);
-            free_var(temp_b);
         }
         else
         {
@@ -439,8 +434,6 @@ Var do_divide(Var a, Var b)
     {
         ans.type = TYPE_ERR;
         ans.v.err = E_TYPE;
-        free_var(temp_a);
-        free_var(temp_b);
         return ans;
     }
 
@@ -472,11 +465,7 @@ Var do_divide(Var a, Var b)
             ans.v.fnum = d;
         }
     }
-
-    free_var(temp_a);
-    free_var(temp_b);
-
-    return ans;
+        return ans;
 }
 
 Var do_power(Var lhs, Var rhs)
@@ -546,6 +535,176 @@ type_error:
     return ans;
 }
 
+#else
+
+#define SIMPLE_BINARY(name, op)                 \
+    Var                                         \
+    do_ ## name(Var a, Var b)                   \
+    {                                           \
+        Var ans;                                \
+        \
+        if (a.type != b.type) {                 \
+            ans.type = TYPE_ERR;                \
+            ans.v.err = E_TYPE;                 \
+        } else if (a.type == TYPE_INT) {        \
+            ans.type = TYPE_INT;                \
+            ans.v.num = a.v.num op b.v.num;     \
+        } else {                                \
+            double d = a.v.fnum op b.v.fnum;    \
+            \
+            if (!IS_REAL(d)) {                  \
+                ans.type = TYPE_ERR;            \
+                ans.v.err = E_FLOAT;            \
+            } else {                            \
+                ans.type = TYPE_FLOAT;          \
+                ans.v.fnum = d;                 \
+            }                                   \
+        }                                       \
+        \
+        return ans;                             \
+    }
+
+SIMPLE_BINARY(add, +)
+SIMPLE_BINARY(subtract, -)
+SIMPLE_BINARY(multiply, *)
+
+Var
+do_modulus(Var a, Var b)
+{
+    Var ans;
+
+    if (a.type != b.type) {
+        ans.type = TYPE_ERR;
+        ans.v.err = E_TYPE;
+    } else if ((a.type == TYPE_INT && b.v.num == 0) || (a.type == TYPE_FLOAT && b.v.fnum == 0.0)) {
+        ans.type = TYPE_ERR;
+        ans.v.err = E_DIV;
+    } else {
+        if (a.type == TYPE_INT)
+        {
+            const auto n = a.v.num;
+            const auto d = b.v.num;
+            const auto result = (n % d + d) % d;
+            ans.type = TYPE_INT;
+            ans.v.num = result;
+        }
+        else
+        {
+            const auto n = a.v.fnum;
+            const auto d = b.v.fnum;
+            const auto result = fmod((fmod(n, d) + d), d);
+            ans.type = TYPE_FLOAT;
+            ans.v.fnum = result;
+        }
+    }
+    return ans;
+}
+
+Var
+do_divide(Var a, Var b)
+{
+    Var ans;
+
+    if (a.type != b.type) {
+        ans.type = TYPE_ERR;
+        ans.v.err = E_TYPE;
+    } else if ((a.type == TYPE_INT && b.v.num == 0) ||
+               (a.type == TYPE_FLOAT && b.v.fnum == 0.0)) {
+        ans.type = TYPE_ERR;
+        ans.v.err = E_DIV;
+    } else if (a.type == TYPE_INT) {
+        ans.type = TYPE_INT;
+        if (a.v.num == MININT && b.v.num == -1)
+            ans.v.num = MININT;
+        else
+            ans.v.num = a.v.num / b.v.num;
+    } else { // must be float
+        double d = a.v.fnum / b.v.fnum;
+        if (!IS_REAL(d)) {
+            ans.type = TYPE_ERR;
+            ans.v.err = E_FLOAT;
+        } else {
+            ans.type = TYPE_FLOAT;
+            ans.v.fnum = d;
+        }
+    }
+
+    return ans;
+}
+
+Var
+do_power(Var lhs, Var rhs)
+{   /* LHS ^ RHS */
+    Var ans;
+
+    if (lhs.type == TYPE_INT) { /* integer exponentiation */
+        Num a = lhs.v.num, b, r;
+
+        if (rhs.type != TYPE_INT)
+            goto type_error;
+
+        b = rhs.v.num;
+        ans.type = TYPE_INT;
+        if (b < 0) {
+            switch (a) {
+                case -1:
+                    ans.v.num = (b & 1) ? 1 : -1;
+                    break;
+                case 0:
+                    ans.type = TYPE_ERR;
+                    ans.v.err = E_DIV;
+                    break;
+                case 1:
+                    ans.v.num = 1;
+                    break;
+                default:
+                    ans.v.num = 0;
+                    break;
+            }
+        } else {
+            r = 1;
+            while (b != 0) {
+                if (b & 1)
+                    r *= a;
+                a *= a;
+                b >>= 1;
+            }
+            ans.v.num = r;
+        }
+    } else if (lhs.type == TYPE_FLOAT) {    /* floating-point exponentiation */
+        double d;
+
+        switch (rhs.type) {
+            case TYPE_INT:
+                d = (double) rhs.v.num;
+                break;
+            case TYPE_FLOAT:
+                d = rhs.v.fnum;
+                break;
+            default:
+                goto type_error;
+        }
+        errno = 0;
+        d = pow(lhs.v.fnum, d);
+        if (errno != 0 || !IS_REAL(d)) {
+            ans.type = TYPE_ERR;
+            ans.v.err = E_FLOAT;
+        } else {
+            ans.type = TYPE_FLOAT;
+            ans.v.fnum = d;
+        }
+    } else
+        goto type_error;
+
+    return ans;
+
+type_error:
+    ans.type = TYPE_ERR;
+    ans.v.err = E_TYPE;
+    return ans;
+}
+
+#endif
 
 /**** built in functions ****/
 
