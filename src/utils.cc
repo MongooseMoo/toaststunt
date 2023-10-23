@@ -488,7 +488,14 @@ equality(Var lhs, Var rhs, int case_matters)
                 panic_moo("EQUALITY: Unknown value type");
         }
     } else {
-        if ((lhs.type == TYPE_FLOAT || rhs.type == TYPE_FLOAT) &&
+                if (lhs.type == TYPE_BOOL && rhs.type == TYPE_INT) {
+            return rhs.v.num == lhs.v.truth;
+        }
+        else         if (rhs.type == TYPE_BOOL && lhs.type == TYPE_INT) {
+            return lhs.v.num == rhs.v.truth;
+        }
+
+        else if ((lhs.type == TYPE_FLOAT || rhs.type == TYPE_FLOAT) &&
             (lhs.type == TYPE_INT || rhs.type == TYPE_INT))
                 return (lhs.type == TYPE_FLOAT ? lhs.v.fnum : lhs.v.num) ==
                        (rhs.type == TYPE_FLOAT ? rhs.v.fnum : rhs.v.num);
