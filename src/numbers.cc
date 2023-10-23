@@ -197,17 +197,6 @@ become_float(Var in, double *ret)
  */
 
 int
-do_equals(Var lhs, Var rhs)
-{   /* LHS == RHS */
-    /* At least one of LHS and RHS is TYPE_FLOAT */
-
-    if (lhs.type != rhs.type)
-        return 0;
-    else
-        return lhs.v.fnum == rhs.v.fnum;
-}
-
-int
 compare_integers(Num a, Num b)
 {
     if (a < b)
@@ -218,36 +207,69 @@ compare_integers(Num a, Num b)
         return 0;
 }
 
-Var
-compare_numbers(Var a, Var b)
+#ifdef PROMOTE_NUMBERS
+
+Var compare_numbers(Var a, Var b)
 {
     Var ans;
 
-    if (a.type != b.type) {
+    int compare_result = 0; 
+
+    if (a.type == TYPE_INT && b.type == TYPE_INT)
+    {
+        compare_result = (a.v.num < b.v.num) ? -1 : ((a.v.num > b.v.num) ? 1 : 0);
+    }
+    else if (a.type == TYPE_FLOAT && b.type == TYPE_FLOAT)
+    {
+        compare_result = (a.v.fnum < b.v.fnum) ? -1 : ((a.v.fnum > b.v.fnum) ? 1 : 0);
+    }
+    else if (a.type == TYPE_INT && b.type == TYPE_FLOAT)
+    {
+        compare_result = (static_cast<double>(a.v.num) < b.v.fnum) ? -1 : ((static_cast<double>(a.v.num) > b.v.fnum) ? 1 : 0);
+    }
+    else if (a.type == TYPE_FLOAT && b.type == TYPE_INT)
+    {
+        compare_result = (a.v.fnum < static_cast<double>(b.v.num)) ? -1 : ((a.v.fnum > static_cast<double>(b.v.num)) ? 1 : 0);
+    }
+    else
+    {
+        // Types don't match or one of them is not numeric, return an error
         ans.type = TYPE_ERR;
         ans.v.err = E_TYPE;
-    } else if (a.type == TYPE_INT) {
-        ans.type = TYPE_INT;
-        if (a.v.num < b.v.num)
-            ans.v.num = -1;
-        else if (a.v.num > b.v.num)
-            ans.v.num = 1;
-        else
-            ans.v.num = 0;
-    } else {
-        ans.type = TYPE_INT;
-        if (a.v.fnum < b.v.fnum)
-            ans.v.num = -1;
-        else if (a.v.fnum > b.v.fnum)
-            ans.v.num = 1;
-        else
-            ans.v.num = 0;
+        return ans;
     }
+
+    ans.type = TYPE_INT;
+    ans.v.num = compare_result;
 
     return ans;
 }
 
-#ifdef PROMOTE_NUMBERS
+int do_equals(Var lhs, Var rhs)
+{
+    /* LHS == RHS */
+    /* Handle comparisons between integers and floats */
+
+    if (lhs.type != rhs.type)
+    {
+        /* If types don't match, compare as floats if one is float */
+        if ((lhs.type == TYPE_FLOAT || rhs.type == TYPE_FLOAT) &&
+            (lhs.type == TYPE_INT || rhs.type == TYPE_INT))
+            return (double)lhs.v.fnum == (double)rhs.v.fnum;
+        else
+            return 0;
+    }
+    else
+    {
+        /* Types match, compare based on type */
+        if (lhs.type == TYPE_INT)
+            return lhs.v.num == rhs.v.num;
+        else if (lhs.type == TYPE_FLOAT)
+            return (double)lhs.v.fnum == (double)rhs.v.fnum;
+        else
+            return 0;
+    }
+}
 
 #define SIMPLE_BINARY(name, op)                                            \
     Var                                                                    \
@@ -535,7 +557,49 @@ type_error:
     return ans;
 }
 
-#else
+#else // PROMOTE_NUMBERS
+
+
+Var
+compare_numbers(Var a, Var b)
+{
+    Var ans;
+
+    if (a.type != b.type) {
+        ans.type = TYPE_ERR;
+        ans.v.err = E_TYPE;
+    } else if (a.type == TYPE_INT) {
+        ans.type = TYPE_INT;
+        if (a.v.num < b.v.num)
+            ans.v.num = -1;
+        else if (a.v.num > b.v.num)
+            ans.v.num = 1;
+        else
+            ans.v.num = 0;
+    } else {
+        ans.type = TYPE_INT;
+        if (a.v.fnum < b.v.fnum)
+            ans.v.num = -1;
+        else if (a.v.fnum > b.v.fnum)
+            ans.v.num = 1;
+        else
+            ans.v.num = 0;
+    }
+
+    return ans;
+}
+
+
+int
+do_equals(Var lhs, Var rhs)
+{   /* LHS == RHS */
+    /* At least one of LHS and RHS is TYPE_FLOAT */
+
+    if (lhs.type != rhs.type)
+        return 0;
+    else
+        return lhs.v.fnum == rhs.v.fnum;
+}
 
 #define SIMPLE_BINARY(name, op)                 \
     Var                                         \
