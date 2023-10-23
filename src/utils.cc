@@ -437,6 +437,12 @@ compare(Var lhs, Var rhs, int case_matters)
                 panic_moo("COMPARE: Invalid value type");
         }
     }
+    if ((lhs.type == TYPE_FLOAT || rhs.type == TYPE_FLOAT) &&
+        (lhs.type == TYPE_INT || rhs.type == TYPE_INT)) {
+            const auto lhs_float = lhs.type == TYPE_FLOAT ? lhs.v.fnum : lhs.v.num;
+            const auto rhs_float = rhs.type == TYPE_FLOAT ? rhs.v.fnum : rhs.v.num;
+            return (lhs_float - rhs_float) < 0.0 ? -1 : 1;
+    }
     return lhs.type - rhs.type;
 }
 
@@ -482,12 +488,10 @@ equality(Var lhs, Var rhs, int case_matters)
                 panic_moo("EQUALITY: Unknown value type");
         }
     } else {
-        if (lhs.type == TYPE_BOOL && rhs.type == TYPE_INT) {
-            return rhs.v.num == lhs.v.truth;
-        }
-        else         if (rhs.type == TYPE_BOOL && lhs.type == TYPE_INT) {
-            return lhs.v.num == rhs.v.truth;
-        }
+        if ((lhs.type == TYPE_FLOAT || rhs.type == TYPE_FLOAT) &&
+            (lhs.type == TYPE_INT || rhs.type == TYPE_INT))
+                return (lhs.type == TYPE_FLOAT ? lhs.v.fnum : lhs.v.num) ==
+                       (rhs.type == TYPE_FLOAT ? rhs.v.fnum : rhs.v.num);
     }
     return 0;
 }
