@@ -462,7 +462,7 @@ pull_input(nhandle * h)
             for (ptr = buffer, end = buffer + count; ptr < end; ptr++) {
                 unsigned char c = *ptr;
 
-                if (isgraph(c) || c == ' ' || c == '\t')
+                if (isgraph(c) || c == ' ' || c == '\t' || (c >= 128 && c <= 254))
                     stream_add_char(s, c);
 #ifdef INPUT_APPLY_BACKSPACE
                 else if (c == 0x08 || c == 0x7F)
