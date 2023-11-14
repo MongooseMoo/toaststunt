@@ -342,7 +342,7 @@ bf_pcre_replace(Var arglist, Byte next, void *vdata, Objid progr)
         char *p = result;
         while (*p)
         {
-            if (!isprint(*p))
+            if (!isprint(*p) && !((unsigned char)*p >= 128 && (unsigned char)*p <= 254))
                 *p = ' ';
             p++;
         }
