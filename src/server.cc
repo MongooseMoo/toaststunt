@@ -1537,7 +1537,7 @@ server_receive_line(server_handle sh, const char *line, bool out_of_band)
     static char oob_prefix[] = OUT_OF_BAND_PREFIX;
     shandle *h = (shandle *) sh.ptr;
 
-    if (sizeof(oob_prefix) > 1 && strncmp(oob_prefix, input, sizeof(oob_prefix) - 1) == 0)
+    if (sizeof(oob_prefix) > 1 && strncmp(oob_prefix, line, sizeof(oob_prefix) - 1) == 0)
         out_of_band = true;
     else
         h->last_activity_time = time(nullptr);
