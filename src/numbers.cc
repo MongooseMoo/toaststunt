@@ -974,13 +974,47 @@ bf_atan(Var arglist, Byte next, void *vdata, Objid progr)
 {
     double d, dd;
 
+    #ifdef PROMOTE_NUMBERS
+    if (arglist.v.list[1].type == TYPE_INT) {
+        d = (double)arglist.v.list[1].v.num;
+    } else if (arglist.v.list[1].type == TYPE_FLOAT) {
+        d = arglist.v.list[1].v.fnum;
+    } else {
+        free_var(arglist);
+        return make_error_pack(E_TYPE);
+    }
+    #else
+    if (arglist.v.list[1].type != TYPE_FLOAT) {
+        free_var(arglist);
+        return make_error_pack(E_TYPE);
+    }
     d = arglist.v.list[1].v.fnum;
+    #endif
+
     errno = 0;
     if (arglist.v.list[0].v.num >= 2) {
+        #ifdef PROMOTE_NUMBERS
+        if (arglist.v.list[2].type == TYPE_INT) {
+            dd = (double)arglist.v.list[2].v.num;
+        } else if (arglist.v.list[2].type == TYPE_FLOAT) {
+            dd = arglist.v.list[2].v.fnum;
+        } else {
+            free_var(arglist);
+            return make_error_pack(E_TYPE);
+        }
+        #else
+        if (arglist.v.list[2].type != TYPE_FLOAT) {
+            free_var(arglist);
+            return make_error_pack(E_TYPE);
+        }
         dd = arglist.v.list[2].v.fnum;
+        #endif
+
         d = atan2(d, dd);
-    } else
+    } else {
         d = atan(d);
+    }
+
     free_var(arglist);
     if (errno == EDOM)
         return make_error_pack(E_INVARG);
@@ -993,8 +1027,35 @@ bf_atan(Var arglist, Byte next, void *vdata, Objid progr)
 static package
 bf_atan2(Var arglist, Byte next, void *vdata, Objid progr)
 {
-    const auto y = arglist.v.list[1].v.fnum;
-    const auto x = arglist.v.list[2].v.fnum;
+    double y, x;
+
+    #ifdef PROMOTE_NUMBERS
+    if (arglist.v.list[1].type == TYPE_INT) {
+        y = (double)arglist.v.list[1].v.num;
+    } else if (arglist.v.list[1].type == TYPE_FLOAT) {
+        y = arglist.v.list[1].v.fnum;
+    } else {
+        free_var(arglist);
+        return make_error_pack(E_TYPE);
+    }
+
+    if (arglist.v.list[2].type == TYPE_INT) {
+        x = (double)arglist.v.list[2].v.num;
+    } else if (arglist.v.list[2].type == TYPE_FLOAT) {
+        x = arglist.v.list[2].v.fnum;
+    } else {
+        free_var(arglist);
+        return make_error_pack(E_TYPE);
+    }
+    #else
+    if (arglist.v.list[1].type != TYPE_FLOAT || arglist.v.list[2].type != TYPE_FLOAT) {
+        free_var(arglist);
+        return make_error_pack(E_TYPE);
+    }
+    y = arglist.v.list[1].v.fnum;
+    x = arglist.v.list[2].v.fnum;
+    #endif
+
     free_var(arglist);
 
     const double result = atan2(y, x);
