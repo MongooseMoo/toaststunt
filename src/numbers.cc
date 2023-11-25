@@ -880,20 +880,55 @@ bf_abs(Var arglist, Byte next, void *vdata, Objid progr)
     return make_var_pack(r);
 }
 
+#ifdef PROMOTE_NUMBERS
+
 #define MATH_FUNC(name)                                                             \
     static package                                                                  \
-    bf_ ## name(Var arglist, Byte next, void *vdata, Objid progr)                   \
+    bf_##name(Var arglist, Byte next, void *vdata, Objid progr)                     \
     {                                                                               \
         errno = 0;                                                                  \
-        const auto result = name(arglist.v.list[1].v.fnum);                         \
+        Var var = arglist.v.list[1];                                                \
+        double input;                                                               \
+        if (var.type == TYPE_INT) {                                                 \
+            input = (double)var.v.num;                                              \
+        } else if (var.type == TYPE_FLOAT) {                                        \
+            input = var.v.fnum;                                                     \
+        } else {                                                                    \
+            free_var(arglist);                                                      \
+            return make_error_pack(E_TYPE);                                         \
+        }                                                                           \
+        double result = name(input);                                                \
         free_var(arglist);                                                          \
         if (errno == EDOM)                                                          \
             return make_error_pack(E_INVARG);                                       \
-        else if (errno != 0  ||  !IS_REAL(result))                                  \
+        else if (errno != 0 || !IS_REAL(result))                                    \
             return make_error_pack(E_FLOAT);                                        \
         else                                                                        \
             return make_float_pack(result);                                         \
     }
+
+#else // PROMOTE_NUMBERS
+
+#define MATH_FUNC(name)                                                             \
+    static package                                                                  \
+    bf_##name(Var arglist, Byte next, void *vdata, Objid progr)                     \
+    {                                                                               \
+        errno = 0;                                                                  \
+        if (arglist.v.list[1].type != TYPE_FLOAT) {                                 \
+            free_var(arglist);                                                      \
+            return make_error_pack(E_TYPE);                                         \
+        }                                                                           \
+        double result = name(arglist.v.list[1].v.fnum);                             \
+        free_var(arglist);                                                          \
+        if (errno == EDOM)                                                          \
+            return make_error_pack(E_INVARG);                                       \
+        else if (errno != 0 || !IS_REAL(result))                                    \
+            return make_error_pack(E_FLOAT);                                        \
+        else                                                                        \
+            return make_float_pack(result);                                         \
+    }
+
+#endif
 
 MATH_FUNC(sqrt)
 MATH_FUNC(cbrt)
@@ -1301,6 +1336,31 @@ register_numbers(void)
     register_function("floatstr", 2, 3, bf_floatstr,
                       TYPE_FLOAT, TYPE_INT, TYPE_ANY);
 
+    #ifdef PROMOTE_NUMBERS
+
+    register_function("sqrt", 1, 1, bf_sqrt, TYPE_NUMERIC);
+    register_function("cbrt", 1, 1, bf_cbrt, TYPE_NUMERIC);
+    register_function("sin", 1, 1, bf_sin, TYPE_NUMERIC);
+    register_function("cos", 1, 1, bf_cos, TYPE_NUMERIC);
+    register_function("tan", 1, 1, bf_tan, TYPE_NUMERIC);
+    register_function("asin", 1, 1, bf_asin, TYPE_NUMERIC);
+    register_function("acos", 1, 1, bf_acos, TYPE_NUMERIC);
+    register_function("atan", 1, 2, bf_atan, TYPE_NUMERIC, TYPE_NUMERIC);
+    register_function("sinh", 1, 1, bf_sinh, TYPE_NUMERIC);
+    register_function("cosh", 1, 1, bf_cosh, TYPE_NUMERIC);
+    register_function("tanh", 1, 1, bf_tanh, TYPE_NUMERIC);
+    register_function("acosh", 1, 1, bf_acosh, TYPE_NUMERIC);
+    register_function("atanh", 1, 1, bf_atanh, TYPE_NUMERIC);
+    register_function("asinh", 1, 1, bf_asinh, TYPE_NUMERIC);
+    register_function("atan2", 2, 2, bf_atan2, TYPE_NUMERIC, TYPE_NUMERIC);
+    register_function("exp", 1, 1, bf_exp, TYPE_NUMERIC);
+    register_function("log", 1, 1, bf_log, TYPE_NUMERIC);
+    register_function("log10", 1, 1, bf_log10, TYPE_NUMERIC);
+    register_function("ceil", 1, 1, bf_ceil, TYPE_NUMERIC);
+    register_function("floor", 1, 1, bf_floor, TYPE_NUMERIC);
+
+    #else // PROMOTE_NUMBERS
+
     register_function("sqrt", 1, 1, bf_sqrt, TYPE_FLOAT);
     register_function("cbrt", 1, 1, bf_cbrt, TYPE_FLOAT);
     register_function("sin", 1, 1, bf_sin, TYPE_FLOAT);
@@ -1321,6 +1381,8 @@ register_numbers(void)
     register_function("log10", 1, 1, bf_log10, TYPE_FLOAT);
     register_function("ceil", 1, 1, bf_ceil, TYPE_FLOAT);
     register_function("floor", 1, 1, bf_floor, TYPE_FLOAT);
+
+    #endif
     register_function("trunc", 1, 1, bf_trunc, TYPE_FLOAT);
 
     /* Possibly misplaced functions... */
