@@ -21,6 +21,11 @@ struct pcre_cache_entry {
     std::atomic_uint refcount;
 };
 
+typedef std::pair<const char*, unsigned char> cache_type;
+
+static void free_entry(pcre_cache_entry *);
+static void delete_cache_entry(const char *pattern, unsigned char options);
+static Var result_indices(int ovector[], int n);
 extern void pcre_shutdown(void);
 
 #ifdef SQLITE3_FOUND

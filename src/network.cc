@@ -985,7 +985,7 @@ timeout_proc(Timer_ID id, Timer_Data data)
     throw timeout_exception();
 }
 
-enum error
+package
 open_connection(Var arglist, int *read_fd, int *write_fd,
                 const char **name, const char **ip_addr,
                 uint16_t *port, sa_family_t *protocol,
@@ -995,15 +995,18 @@ open_connection(Var arglist, int *read_fd, int *write_fd,
     int s, result;
     struct addrinfo * servinfo, *p, hint;
     int yes = 1;
+#ifdef USE_TLS
+    char *tls_error_msg;
+#endif
 
     if (!outbound_network_enabled)
-        return E_PERM;
+        return make_raise_pack(E_PERM, "Outbound network connections are disabled.", zero);
 
     if (arglist.v.list[0].v.num < 2)
-        return E_ARGS;
+        return make_error_pack(E_ARGS);
     else if (arglist.v.list[1].type != TYPE_STR ||
              arglist.v.list[2].type != TYPE_INT)
-        return E_TYPE;
+        return make_error_pack(E_TYPE);
 
     const char *host_name = arglist.v.list[1].v.str;
     int host_port = arglist.v.list[2].v.num;
@@ -1018,7 +1021,7 @@ open_connection(Var arglist, int *read_fd, int *write_fd,
     free(port_string);
     if (rv != 0) {
         errlog("open_connection getaddrinfo error: %s\n", gai_strerror(rv));
-        return E_INVARG;
+        return make_raise_pack(E_INVARG, "getaddrinfo error", str_dup_to_var(gai_strerror(rv)));
     }
 
     /* If we have multiple results, we'll bind to the first one we can. */
@@ -1033,7 +1036,7 @@ open_connection(Var arglist, int *read_fd, int *write_fd,
             log_perror("Error setting listening socket options");
             close(s);
             freeaddrinfo(servinfo);
-            return E_QUOTA;
+            return make_raise_pack(E_QUOTA, "Error setting listening socket options", zero);
         }
 
         break;
@@ -1046,7 +1049,7 @@ open_connection(Var arglist, int *read_fd, int *write_fd,
         if (errno == EACCES)
             e = E_PERM;
         freeaddrinfo(servinfo);
-        return e;
+        return make_raise_pack(e, "Failed to bind to listening socket", str_dup_to_var(strerror(errno)));
     }
 
     try {
@@ -1065,13 +1068,15 @@ open_connection(Var arglist, int *read_fd, int *write_fd,
             } else {
                 SSL_set_fd(*tls, s);
                 SSL_set_connect_state(*tls);
+                SSL_set_tlsext_host_name(*tls, host_name);
                 int tls_success = SSL_connect(*tls);
                 if (tls_success <= 0) {
                     SSL_get_error(*tls, tls_success);
-                    errlog("TLS: Connect failed: %s\n", ERR_error_string(ERR_get_error(), nullptr));
+                    tls_error_msg = ERR_error_string(ERR_get_error(), nullptr);
+                    ERR_clear_error();
+                    errlog("TLS: Connect failed: %s\n", tls_error_msg);
                     result = -1;
                     errno = TLS_CONNECT_FAIL;
-                    ERR_clear_error();
                 } else {
 #ifdef LOG_TLS_CONNECTIONS
                     oklog("TLS: %s. Cipher: %s\n", SSL_state_string_long(*tls), SSL_get_cipher(*tls));
@@ -1096,21 +1101,22 @@ open_connection(Var arglist, int *read_fd, int *write_fd,
                 errno == ENETUNREACH ||
                 errno == ETIMEDOUT) {
             log_perror("open_network_connection error");
-            return E_INVARG;
+            return make_raise_pack(E_INVARG, "Connection failure", str_dup_to_var(strerror(errno)));
 #ifdef USE_TLS
         } else if (errno == TLS_FAIL) {
-            return E_INVARG;
+            return make_raise_pack(E_INVARG, "Error creating TLS context", zero);
         } else if (errno == TLS_CONNECT_FAIL) {
             if (*tls) {
                 SSL_shutdown(*tls);
                 SSL_free(*tls);
             }
-            return E_INVARG;
+            package ret = make_raise_pack(E_INVARG, "TLS connection failed", str_dup_to_var(tls_error_msg));
+            return ret;
 #endif
         }
 
         log_perror("Connecting in open_connection");
-        return E_QUOTA;
+        return make_raise_pack(E_QUOTA, "Connection failure", str_dup_to_var(strerror(errno)));
     }
 
     *read_fd = *write_fd = s;
@@ -1126,7 +1132,7 @@ open_connection(Var arglist, int *read_fd, int *write_fd,
 
     freeaddrinfo(servinfo);
 
-    return E_NONE;
+    return make_error_pack(E_NONE);
 }
 #endif              /* OUTBOUND_NETWORK */
 
@@ -1376,7 +1382,7 @@ network_process_io(int timeout)
         {
             mplex_add_reader(h->rfd);
 #ifdef USE_TLS
-            if (h->tls && h->connected && SSL_has_pending(h->tls)) {
+            if (h->tls && SSL_has_pending(h->tls)) {
                 pending_tls = true;
                 timeout = 0;
             }
@@ -1395,7 +1401,7 @@ network_process_io(int timeout)
                 accept_new_connection(l);
         for (h = all_nhandles; h; h = hnext) {
             hnext = h->next;
-            if (((mplex_is_readable(h->rfd) && !pull_input(h))
+            if (((fd_is_readable(h) && !pull_input(h))
                     || (mplex_is_writable(h->wfd) && !push_output(h))) && get_nhandle_refcount(h) == 1) {
                 server_close(h->shandle);
                 network_handle nh;
@@ -1409,7 +1415,7 @@ network_process_io(int timeout)
 }
 
 int
-rewrite_connection_name(network_handle nh, const char *destination, const char *destination_ip, const char *source, const char *source_port)
+rewrite_connection_name(const network_handle nh, const char *destination, const char *destination_ip, const char *source, const char *source_port)
 {
     const char *nameinfo;
     struct addrinfo *address;
@@ -1441,13 +1447,9 @@ rewrite_connection_name(network_handle nh, const char *destination, const char *
 }
 
 int
-network_name_lookup_rewrite(Objid obj, const char *name)
+network_name_lookup_rewrite(const Objid obj, const char *name, const network_handle nh)
 {
-    network_handle *nh;
-    if (find_network_handle(obj, &nh) < 0)
-        return -1;
-
-    nhandle *h = (nhandle *) nh->ptr;
+    nhandle *h = (nhandle *) nh.ptr;
 
     pthread_mutex_lock(h->name_mutex);
     applog(LOG_INFO3, "NAME_LOOKUP: connection_name for #%" PRIdN " changed from `%s` to `%s`\n", obj, h->name, name);
@@ -1515,21 +1517,20 @@ lookup_network_connection_name(const network_handle nh, const char **name)
     const nhandle *h = (nhandle *) nh.ptr;
     int retval = 0;
 
-    pthread_mutex_lock(h->name_mutex);
-
     struct addrinfo *address = 0;
     int status = getaddrinfo(h->destination_ipaddr, nullptr, &tcp_hint, &address);
+
     if (status < 0) {
         // Better luck next time.
+        pthread_mutex_lock(h->name_mutex);
         *name = str_dup(h->name);
+        pthread_mutex_unlock(h->name_mutex);
         retval = -1;
     } else {
         *name = get_nameinfo(address->ai_addr);
     }
     if (address)
         freeaddrinfo(address);
-
-    pthread_mutex_unlock(h->name_mutex);
 
     return retval;
 }
@@ -1749,7 +1750,7 @@ setsockopt(h->rfd, IPPROTO_TCP, TCP_KEEPALIVE, &idle, sizeof(idle)) < 0 ||
 }
 
 #ifdef OUTBOUND_NETWORK
-enum error
+extern package
 network_open_connection(Var arglist, server_listener sl, bool use_ipv6 USE_TLS_BOOL_DEF)
 {
     int rfd, wfd;
@@ -1757,14 +1758,14 @@ network_open_connection(Var arglist, server_listener sl, bool use_ipv6 USE_TLS_B
     const char *ip_addr;
     uint16_t port;
     sa_family_t protocol;
-    enum error e;
+    package e;
     nhandle *h;
 #ifdef USE_TLS
     SSL *tls = nullptr;
 #endif
 
     e = open_connection(arglist, &rfd, &wfd, &name, &ip_addr, &port, &protocol, use_ipv6 USE_TLS_BOOL SSL_CONTEXT_2_ARG);
-    if (e == E_NONE) {
+    if (e.u.raise.code.v.err == E_NONE) {
         h = make_new_connection(sl, rfd, wfd, 1, 0, nullptr, nullptr, port, name, ip_addr, protocol SSL_CONTEXT_1_ARG);
 #ifdef USE_TLS
         h->connected = true;
@@ -1823,4 +1824,17 @@ int
 network_set_connection_option(network_handle nh, const char *option, Var value)
 {
     CONNECTION_OPTION_SET(NETWORK_CO_TABLE, nh, option, value);
+}
+
+static inline bool fd_is_readable(const nhandle *h)
+{
+    if (mplex_is_readable(h->rfd))
+        return true;
+
+#ifdef USE_TLS
+    if (h->tls && SSL_has_pending(h->tls))
+        return true;
+#endif
+
+    return false;
 }

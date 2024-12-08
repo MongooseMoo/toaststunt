@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.5)
 set(VERSION_MAJOR 2)
 set(VERSION_MINOR 7)
 set(VERSION_RELEASE 2)
-set(VERSION_EXT "")
+set(VERSION_EXT "_11")
 project(ToastStunt VERSION ${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_RELEASE} LANGUAGES CXX C)
 
 # Compile Options
@@ -53,7 +53,7 @@ else()
 endif()
 
 # Compiler Flags
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_C_STANDARD 99)
 
 # These flags are shared by the RELEASE and WARN build types.

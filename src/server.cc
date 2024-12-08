@@ -2670,7 +2670,7 @@ bf_open_network_connection(Var arglist, Byte next, void *vdata, Objid progr)
     Options: ipv6 -> INT, listener -> OBJ, tls -> INT, tls_verify -> INT */
 
     Var r;
-    enum error e;
+    package e;
     server_listener sl;
     slistener l;
     bool use_ipv6 = false;
@@ -2736,7 +2736,7 @@ bf_open_network_connection(Var arglist, Byte next, void *vdata, Objid progr)
 
     e = network_open_connection(arglist, sl, use_ipv6 USE_TLS_BOOL);
     free_var(arglist);
-    if (e == E_NONE) {
+    if (e.u.raise.code.v.err == E_NONE) {
         /* The connection was successfully opened, implying that
          * server_new_connection was called, implying and a new negative
          * player number was allocated for the connection.  Thus, the old
@@ -2744,14 +2744,10 @@ bf_open_network_connection(Var arglist, Byte next, void *vdata, Objid progr)
          */
         r.type = TYPE_OBJ;
         r.v.obj = next_unconnected_player + 1;
-    } else {
-        r.type = TYPE_ERR;
-        r.v.err = e;
-    }
-    if (r.type == TYPE_ERR)
-        return make_error_pack(r.v.err);
-    else
         return make_var_pack(r);
+    } else {
+        return e;
+    }
 
 #else               /* !OUTBOUND_NETWORK */
 
@@ -2894,12 +2890,12 @@ name_lookup_callback(Var arglist, Var *ret, void *extra_data)
         /* If the server is shutting down, this is meaningless and creates
          * a bit of a mess anyway. So don't bother continuing. */
         if (!shutdown_triggered.load()) {
-        ret->type = TYPE_STR;
-        ret->v.str = name;
+            ret->type = TYPE_STR;
+            ret->v.str = name;
 
-        if (rewrite_connect_name && status == 0)
-            if (network_name_lookup_rewrite(who, name) != 0)
-                make_error_map(E_INVARG, "Failed to rewrite connection name.", ret);
+            if (rewrite_connect_name && status == 0)
+                if (network_name_lookup_rewrite(who, name, nh) != 0)
+                    make_error_map(E_INVARG, "Failed to rewrite connection name.", ret);
         }
     }
 }
@@ -3227,7 +3223,7 @@ bf_listeners(Var arglist, Byte next, void *vdata, Objid progr)
 // Save the keys for later
     static const Var object = str_dup_to_var("object");
     static const Var port = str_dup_to_var("port");
-    static const Var print = str_dup_to_var("print_messages");
+    static const Var print = str_dup_to_var("print-messages");
 
     for (l = all_slisteners; l; l = l->next) {
         if (!find_listener || equality(find, (find.type == TYPE_OBJ) ? Var::new_obj(l->oid) : l->desc, 0)) {

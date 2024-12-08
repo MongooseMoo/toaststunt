@@ -3,8 +3,9 @@
 #ifdef PCRE_FOUND
 
 #include <ctype.h>
-#include <map>
+#include <unordered_map>
 #include <limits.h>
+#include <string>
 
 #include "pcre_moo.h"
 #include "functions.h"
@@ -16,22 +17,31 @@
 #include "dependencies/pcrs.h"
 #include "dependencies/xtrapbits.h"
 
-struct StrCompare : public std::binary_function<const char*, const char*, bool>
+#ifndef PCRE_STUDY_JIT_COMPILE
+#define PCRE_STUDY_JIT_COMPILE 0
+#endif
+
+template<>
+struct std::hash<cache_type>
+{
+    std::size_t operator()(const cache_type& t) const noexcept
+    {
+        return std::hash<std::string>{}(std::string(t.first) + (char)t.second);
+    }
+};
+
+struct CacheEqual : public std::binary_function<const cache_type&, const cache_type&, bool>
 {
 public:
-    bool operator() (const char* str1, const char* str2) const
+    bool operator() (const cache_type& c1, const cache_type& c2) const
     {
-        return strcmp(str1, str2) < 0;
+        return strcmp(c1.first, c2.first) == 0 && c1.second == c2.second;
     }
 };
 
 static pthread_mutex_t cache_mutex;
 typedef std::pair<const char*, unsigned char> cache_type;
-static std::map<cache_type, pcre_cache_entry*> pcre_pattern_cache;
-
-static void free_entry(pcre_cache_entry *);
-static void delete_cache_entry(const char *pattern, unsigned char options);
-static Var result_indices(int ovector[], int n);
+static std::unordered_map<cache_type, pcre_cache_entry*, std::hash<cache_type>, CacheEqual> pcre_pattern_cache;
 
 static struct pcre_cache_entry *
 get_pcre(const char *string, unsigned char options)
@@ -47,7 +57,7 @@ get_pcre(const char *string, unsigned char options)
     } else {
         /* If the cache is too large, remove the entry with the least amount of hits. */
         if (pcre_pattern_cache.size() >= PCRE_PATTERN_CACHE_SIZE) {
-            std::map<cache_type, pcre_cache_entry*>::iterator entry_to_delete = pcre_pattern_cache.begin(), it = entry_to_delete;
+            std::unordered_map<cache_type, pcre_cache_entry*, std::hash<cache_type>, CacheEqual>::iterator entry_to_delete = pcre_pattern_cache.begin(), it = entry_to_delete;
             while (it != pcre_pattern_cache.end()) {
                 if (it->second->cache_hits < entry_to_delete->second->cache_hits) {
                     entry_to_delete = it;
@@ -59,9 +69,10 @@ get_pcre(const char *string, unsigned char options)
             }
             /* We could use delete_cache_entry here, and arguably it would be cleaner, but that would cause an extra pointless
                iteration full of string comparisons. Fortunately we have enough information here to deal with it directly. */
-            free_entry(entry_to_delete->second);
-            free_str(entry_to_delete->first.first);
+            auto entry = *entry_to_delete;
             pcre_pattern_cache.erase(entry_to_delete);
+            free_entry(entry.second);
+            free_str(entry.first.first);
         }
 
         const char *err;
@@ -82,7 +93,7 @@ get_pcre(const char *string, unsigned char options)
             entry->error = str_dup(buf);
         } else {
             const char *error = nullptr;
-//            entry->extra = pcre_study(entry->re, 0, &error);
+            entry->extra = pcre_study(entry->re, PCRE_STUDY_JIT_COMPILE, &error);
             if (error != nullptr)
                 entry->error = str_dup(error);
             else
@@ -297,9 +308,10 @@ static void delete_cache_entry(const char *pattern, unsigned char options)
     cache_type pair = std::make_pair(pattern, options);
     pthread_mutex_lock(&cache_mutex);
     auto it = pcre_pattern_cache.find(pair);
-    free_str(it->first.first);
-    free_entry(it->second);
+    auto entry = *it;
     pcre_pattern_cache.erase(it);
+    free_str(entry.first.first);
+    free_entry(entry.second);
     pthread_mutex_unlock(&cache_mutex);
 }
 
@@ -432,7 +444,12 @@ void sqlite_regexp(sqlite3_context *ctx, int argc, sqlite3_value **argv)
 
 void
 register_pcre() {
-    oklog("REGISTER_PCRE: Using PCRE Library v%s\n", pcre_version());
+    oklog("REGISTER_PCRE: Using PCRE Library v%s"
+#ifdef PCRE_CONFIG_JIT
+    " (JIT)"
+#endif
+    "\n", pcre_version());
+
     //                                                   string    pattern   ?case     ?find_all
     register_function("pcre_match", 2, 4, bf_pcre_match, TYPE_STR, TYPE_STR, TYPE_INT, TYPE_INT);
     register_function("pcre_replace", 2, 2, bf_pcre_replace, TYPE_STR, TYPE_STR);
