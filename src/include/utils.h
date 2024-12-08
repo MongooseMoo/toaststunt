@@ -86,8 +86,8 @@ extern void stream_add_raw_bytes_to_clean(Stream *, const char *buffer, int bufl
 extern const char *raw_bytes_to_clean(const char *buffer, int buflen);
 extern const char *clean_to_raw_bytes(const char *binary, int *rawlen);
 
-extern void stream_add_raw_bytes_to_binary(Stream *, const char *buffer, int buflen);
-extern const char *raw_bytes_to_binary(const char *buffer, int buflen);
+extern void stream_add_raw_bytes_to_binary(Stream *, const char *buffer, int buflen, bool allow_extended=false);
+extern const char *raw_bytes_to_binary(const char *buffer, int buflen, bool allow_extended=false);
 extern const char *binary_to_raw_bytes(const char *binary, int *rawlen);
 
 extern Var anonymizing_var_ref(Var v, Objid progr);

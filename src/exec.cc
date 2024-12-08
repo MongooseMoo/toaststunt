@@ -182,7 +182,7 @@ stdout_readable(int fd, void *data)
     char buffer[1000];
     int n;
     while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
-        stream_add_string(tw->sout, raw_bytes_to_binary(buffer, n));
+        stream_add_string(tw->sout, raw_bytes_to_binary(buffer, n, true));
     }
 }
 
@@ -193,7 +193,7 @@ stderr_readable(int fd, void *data)
     char buffer[1000];
     int n;
     while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
-        stream_add_string(tw->serr, raw_bytes_to_binary(buffer, n));
+        stream_add_string(tw->serr, raw_bytes_to_binary(buffer, n, true));
     }
 }
 

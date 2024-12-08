@@ -178,7 +178,9 @@ static const char *file_modestr_to_mode(const char *s, file_type *type, file_mod
     if (!file_type_binary) {
         file_type_binary = (struct fileio_file_type *)mymalloc(sizeof(struct fileio_file_type), M_STRING);
         file_type_text = (struct fileio_file_type *)mymalloc(sizeof(struct fileio_file_type), M_STRING);
-        file_type_binary->in_filter = raw_bytes_to_binary;
+        file_type_binary->in_filter = [](const char* data, int buflen) -> const char* {
+            return raw_bytes_to_binary(data, buflen);
+        };
         file_type_binary->out_filter = binary_to_raw_bytes;
         file_type_text->in_filter = raw_bytes_to_clean;
         file_type_text->out_filter = clean_to_raw_bytes;
