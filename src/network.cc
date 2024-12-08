@@ -382,7 +382,7 @@ push_output(nhandle * h)
     return 1;
 }
 
-void 
+int 
 process_telnet_byte(nhandle *h, Stream *input_stream, Stream *oob_stream, unsigned char c) 
 {
     #define TN_IAC  255
@@ -392,6 +392,12 @@ process_telnet_byte(nhandle *h, Stream *input_stream, Stream *oob_stream, unsign
     #define TN_WONT 252
     #define TN_SE   240
     #define TN_SB   250
+        if (stream_length(h->command_stream) >= MAX_LINE_BYTES) {
+        errlog("Connection `%s` exceeded MAX_LINE_BYTES in telnet command! (%" PRIdN " /%" PRIdN ")\n", 
+               h->name, stream_length(h->command_stream), MAX_LINE_BYTES);
+        return 0;  // Signal connection should be closed
+    }
+
     switch (h->telnet_state) {
         case TELNET_STATE_NORMAL:
             if (c == TN_IAC) {
@@ -464,6 +470,7 @@ process_telnet_byte(nhandle *h, Stream *input_stream, Stream *oob_stream, unsign
             }
             break;
     }
+    return 1;
 }
 
 static int
@@ -547,13 +554,15 @@ pull_input(nhandle * h)
             server_receive_line(h->shandle, reset_stream(s), false);
             h->last_input_was_CR = 0;
         } else {
-            Stream *oob = new_stream(100);  // For completed telnet commands
+            Stream *oob = new_stream(100);
             
             for (ptr = buffer, end = buffer + count; ptr < end; ptr++) {
-                process_telnet_byte(h, s, oob, *ptr);
+                if (!process_telnet_byte(h, s, oob, *ptr)) {
+                    free_stream(oob);
+                    return 0;  // Close connection due to oversize telnet command
+                }
             }
 
-            // If we accumulated any complete telnet commands, send them
             if (stream_length(oob) > 0) {
                 server_receive_line(h->shandle, reset_stream(oob), 1);
             }
