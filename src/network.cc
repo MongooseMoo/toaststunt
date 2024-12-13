@@ -405,7 +405,7 @@ process_telnet_byte(nhandle *h, Stream *input_stream, Stream *oob_stream, unsign
                 reset_stream(h->command_stream);
                 stream_add_char(h->command_stream, c);
             } else {
-                if (isgraph(c) || c == ' ' || c == '\t')
+                if (isgraph(c) || c == ' ' || c == '\t' || (c >= 128 && c <= 254))
                     stream_add_char(input_stream, c);
 #ifdef INPUT_APPLY_BACKSPACE
                 else if (c == 0x08 || c == 0x7F)
