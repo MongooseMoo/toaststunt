@@ -12,15 +12,28 @@ echo "=== ToastStunt Test Runner ==="
 # Ensure we're in the test directory
 cd "$(dirname "$0")" || exit 1
 
-# Start server if not running - check if test_server.sh exists
+# Check if test_server.sh exists - look in parent directory
 if [ -f "./test_server.sh" ]; then
-    if ! ./test_server.sh status | grep -q "Server is running"; then
-        echo "Starting test server..."
-        ./test_server.sh start
-        sleep 2
-    fi
+    TEST_SERVER_SCRIPT="./test_server.sh"
+elif [ -f "../test_server.sh" ]; then
+    TEST_SERVER_SCRIPT="../test_server.sh"
 else
-    echo "Note: test_server.sh not found, assuming server is already running"
+    echo "ERROR: test_server.sh not found!"
+    echo "Searched in:"
+    echo "  - Current directory: $(pwd)"
+    echo "  - Parent directory: $(dirname $(pwd))"
+    echo ""
+    echo "Make sure test_server.sh exists in the ToastStunt root directory."
+    exit 1
+fi
+
+echo "Using test server script: $TEST_SERVER_SCRIPT"
+
+# Start server if not running
+if ! $TEST_SERVER_SCRIPT status | grep -q "Server is running"; then
+    echo "Starting test server..."
+    $TEST_SERVER_SCRIPT start
+    sleep 2
 fi
 
 # Default to all tests if no argument provided

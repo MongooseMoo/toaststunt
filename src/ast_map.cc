@@ -701,6 +701,87 @@ static Expr *map_to_expr_visitor(Var map, Symtab *symtab) {
             return alloc_binary(kind, lhs, rhs);
         }
         
+        case EXPR_CALL: {
+            // Function call: func_name(args)
+            Var func_field;
+            if (maplookup(map, str_dup_to_var("func"), &func_field, 0) == nullptr) {
+                return nullptr;
+            }
+            if (func_field.type != TYPE_STR) {
+                return nullptr;
+            }
+            
+            // Look up function by name
+            unsigned func_num = number_func_by_name(func_field.v.str);
+            if (func_num == 0) {
+                return nullptr; // Unknown function
+            }
+            
+            // Handle arguments (optional field)
+            Arg_List *args = nullptr;
+            Var args_field;
+            if (maplookup(map, str_dup_to_var("args"), &args_field, 0) != nullptr) {
+                if (args_field.type == TYPE_LIST) {
+                    // Convert arguments to Arg_List
+                    Arg_List **last_ptr = &args;
+                    
+                    for (int i = 1; i <= args_field.v.list[0].v.num; i++) {
+                        Var arg_element = args_field.v.list[i];
+                        if (arg_element.type != TYPE_MAP) {
+                            // Cleanup and return error
+                            while (args) {
+                                Arg_List *next = args->next;
+                                if (args->expr) dealloc_node(args->expr);
+                                myfree(args, M_AST);
+                                args = next;
+                            }
+                            return nullptr;
+                        }
+                        
+                        // Extract expr field from argument
+                        Var expr_field;
+                        if (maplookup(arg_element, str_dup_to_var("expr"), &expr_field, 0) == nullptr) {
+                            // Cleanup and return error
+                            while (args) {
+                                Arg_List *next = args->next;
+                                if (args->expr) dealloc_node(args->expr);
+                                myfree(args, M_AST);
+                                args = next;
+                            }
+                            return nullptr;
+                        }
+                        
+                        Expr *expr = map_to_expr_visitor(expr_field, symtab);
+                        if (!expr) {
+                            // Cleanup and return error
+                            while (args) {
+                                Arg_List *next = args->next;
+                                if (args->expr) dealloc_node(args->expr);
+                                myfree(args, M_AST);
+                                args = next;
+                            }
+                            return nullptr;
+                        }
+                        
+                        // Create new Arg_List node
+                        Arg_List *new_arg = (Arg_List *)mymalloc(sizeof(Arg_List), M_AST);
+                        new_arg->expr = expr;
+                        new_arg->kind = ARG_NORMAL;
+                        new_arg->next = nullptr;
+                        
+                        // Add to list
+                        *last_ptr = new_arg;
+                        last_ptr = &new_arg->next;
+                    }
+                }
+            }
+            
+            Expr *result = alloc_expr(EXPR_CALL);
+            result->e.call.func = func_num;
+            result->e.call.args = args;
+            return result;
+        }
+        
         case EXPR_NOT:
         case EXPR_NEGATE:
         case EXPR_COMPLEMENT: {
@@ -744,6 +825,78 @@ static Expr *map_to_expr_visitor(Var map, Symtab *symtab) {
             result->e.cond.condition = condition;
             result->e.cond.consequent = consequent;
             result->e.cond.alternate = alternate;
+            return result;
+        }
+        
+        case EXPR_LIST: {
+            // List literal: {expr1, expr2, ...}
+            Var elements_field;
+            if (maplookup(map, str_dup_to_var("elements"), &elements_field, 0) == nullptr) {
+                // Empty list
+                Expr *result = alloc_expr(EXPR_LIST);
+                result->e.list = nullptr;
+                return result;
+            }
+            
+            if (elements_field.type != TYPE_LIST) {
+                return nullptr;
+            }
+            
+            // Convert elements to Arg_List
+            Arg_List *arg_list = nullptr;
+            Arg_List **last_ptr = &arg_list;
+            
+            for (int i = 1; i <= elements_field.v.list[0].v.num; i++) {
+                Var element = elements_field.v.list[i];
+                if (element.type != TYPE_MAP) {
+                    // Cleanup and return error
+                    while (arg_list) {
+                        Arg_List *next = arg_list->next;
+                        if (arg_list->expr) dealloc_node(arg_list->expr);
+                        myfree(arg_list, M_AST);
+                        arg_list = next;
+                    }
+                    return nullptr;
+                }
+                
+                // Extract expr field from element
+                Var expr_field;
+                if (maplookup(element, str_dup_to_var("expr"), &expr_field, 0) == nullptr) {
+                    // Cleanup and return error
+                    while (arg_list) {
+                        Arg_List *next = arg_list->next;
+                        if (arg_list->expr) dealloc_node(arg_list->expr);
+                        myfree(arg_list, M_AST);
+                        arg_list = next;
+                    }
+                    return nullptr;
+                }
+                
+                Expr *expr = map_to_expr_visitor(expr_field, symtab);
+                if (!expr) {
+                    // Cleanup and return error
+                    while (arg_list) {
+                        Arg_List *next = arg_list->next;
+                        if (arg_list->expr) dealloc_node(arg_list->expr);
+                        myfree(arg_list, M_AST);
+                        arg_list = next;
+                    }
+                    return nullptr;
+                }
+                
+                // Create new Arg_List node
+                Arg_List *new_arg = (Arg_List *)mymalloc(sizeof(Arg_List), M_AST);
+                new_arg->expr = expr;
+                new_arg->kind = ARG_NORMAL; // Default to normal arguments
+                new_arg->next = nullptr;
+                
+                // Add to list
+                *last_ptr = new_arg;
+                last_ptr = &new_arg->next;
+            }
+            
+            Expr *result = alloc_expr(EXPR_LIST);
+            result->e.list = arg_list;
             return result;
         }
         
