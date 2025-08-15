@@ -24,8 +24,12 @@
 #include "storage.h"
 #include "streams.h"
 #include "structures.h"
+#include "unparse.h"
 #include "utils.h"
 #include "version.h"
+
+// Forward declarations
+static char *unparse_expr_to_string(Expr *expr, Symtab *symtab);
 
 // AST Schema Version - increment when breaking changes occur
 static const int AST_SCHEMA_VERSION = 1;
@@ -52,44 +56,44 @@ static const int SizeOf_Stmt_Kind = 11; // STMT_COND through STMT_CONTINUE
 
 // Expression type strings (must match enum Expr_Kind order)
 static const char *expr_type_names[SizeOf_Expr_Kind] = {
-    "var",        // EXPR_VAR
-    "id",         // EXPR_ID  
-    "asgn",       // EXPR_ASGN
-    "prop",       // EXPR_PROP
-    "verb",       // EXPR_VERB
-    "index",      // EXPR_INDEX
-    "range",      // EXPR_RANGE
-    "and",        // EXPR_AND
-    "or",         // EXPR_OR
-    "not",        // EXPR_NOT
-    "negate",     // EXPR_NEGATE
-    "complement", // EXPR_COMPLEMENT
-    "eq",         // EXPR_EQ
-    "ne",         // EXPR_NE
-    "lt",         // EXPR_LT
-    "le",         // EXPR_LE
-    "gt",         // EXPR_GT
-    "ge",         // EXPR_GE
-    "in",         // EXPR_IN
-    "plus",       // EXPR_PLUS
-    "minus",      // EXPR_MINUS
-    "times",      // EXPR_TIMES
-    "divide",     // EXPR_DIVIDE
-    "mod",        // EXPR_MOD
-    "exp",        // EXPR_EXP
-    "bitor",      // EXPR_BITOR
-    "bitand",     // EXPR_BITAND
-    "bitxor",     // EXPR_BITXOR
-    "bitshl",     // EXPR_BITSHL
-    "bitshr",     // EXPR_BITSHR
-    "cond",       // EXPR_COND
-    "list",       // EXPR_LIST
-    "map",        // EXPR_MAP
-    "call",       // EXPR_CALL
-    "scatter",    // EXPR_SCATTER
-    "catch",      // EXPR_CATCH
-    "first",      // EXPR_FIRST
-    "last"        // EXPR_LAST
+    "var",        // EXPR_VAR      (0)
+    "id",         // EXPR_ID       (1)
+    "prop",       // EXPR_PROP     (2)
+    "verb",       // EXPR_VERB     (3)
+    "index",      // EXPR_INDEX    (4)
+    "range",      // EXPR_RANGE    (5)
+    "asgn",       // EXPR_ASGN     (6)
+    "call",       // EXPR_CALL     (7)
+    "plus",       // EXPR_PLUS     (8)
+    "minus",      // EXPR_MINUS    (9)
+    "times",      // EXPR_TIMES    (10)
+    "divide",     // EXPR_DIVIDE   (11)
+    "mod",        // EXPR_MOD      (12)
+    "exp",        // EXPR_EXP      (13)
+    "negate",     // EXPR_NEGATE   (14)
+    "and",        // EXPR_AND      (15)
+    "or",         // EXPR_OR       (16)
+    "not",        // EXPR_NOT      (17)
+    "eq",         // EXPR_EQ       (18)
+    "ne",         // EXPR_NE       (19)
+    "lt",         // EXPR_LT       (20)
+    "le",         // EXPR_LE       (21)
+    "gt",         // EXPR_GT       (22)
+    "ge",         // EXPR_GE       (23)
+    "in",         // EXPR_IN       (24)
+    "list",       // EXPR_LIST     (25)
+    "cond",       // EXPR_COND     (26)
+    "map",        // EXPR_MAP      (27)
+    "bitor",      // EXPR_BITOR    (28)
+    "bitand",     // EXPR_BITAND   (29)
+    "bitxor",     // EXPR_BITXOR   (30)
+    "bitshl",     // EXPR_BITSHL   (31)
+    "bitshr",     // EXPR_BITSHR   (32)
+    "complement", // EXPR_COMPLEMENT (33)
+    "scatter",    // EXPR_SCATTER  (34)
+    "catch",      // EXPR_CATCH    (35)
+    "first",      // EXPR_FIRST    (36)
+    "last"        // EXPR_LAST     (37)
 };
 
 // Statement type strings (must match enum Stmt_Kind order)  
@@ -349,6 +353,24 @@ static Var expr_to_map_visitor(Expr *expr, Symtab *symtab) {
                                expr_to_map_visitor(expr->e.cond.consequent, symtab));
             result = mapinsert(result, str_dup_to_var("alternate"), 
                                expr_to_map_visitor(expr->e.cond.alternate, symtab));
+            break;
+            
+        case EXPR_LIST:
+            // List literal: {expr1, expr2, ...}
+            if (expr->e.list) {
+                Var elements = new_list(0);
+                int count = 0;
+                for (Arg_List *arg = expr->e.list; arg; arg = arg->next) {
+                    count++;
+                    Var element = new_map();
+                    element = mapinsert(element, str_dup_to_var("kind"), 
+                                        str_dup_to_var(arg->kind == ARG_SPLICE ? "splice" : "normal"));
+                    element = mapinsert(element, str_dup_to_var("expr"), 
+                                        expr_to_map_visitor(arg->expr, symtab));
+                    elements = listinsert(elements, element, count);
+                }
+                result = mapinsert(result, str_dup_to_var("elements"), elements);
+            }
             break;
             
         // TODO: Implement remaining expression types
@@ -985,6 +1007,294 @@ const char *symtab_get_name(Symtab *symtab, int id) {
     return symtab->names[id];
 }
 
+/*********** Unparse Wrapper Functions ***********/
+
+// Structure to collect unparse output into a Var list
+typedef struct {
+    Var *result;     // Pointer to the result list
+    int line_count;  // Current number of lines
+} unparse_collector;
+
+// Callback function to collect unparse output lines
+static void collect_unparse_line(void *data, const char *line) {
+    unparse_collector *collector = (unparse_collector *)data;
+    
+    // Extend the list to hold one more line
+    collector->line_count++;
+    *collector->result = listinsert(*collector->result, str_dup_to_var(line), collector->line_count);
+}
+
+// Create minimal Program context for unparsing (needs variable names)
+static Program *create_minimal_program(Symtab *symtab) {
+    Program *prog = (Program *)mymalloc(sizeof(Program), M_PROGRAM);
+    memset(prog, 0, sizeof(Program));
+    
+    // Set up variable names array from symbol table
+    if (symtab && symtab->num_names > 0) {
+        prog->num_var_names = symtab->num_names;
+        prog->var_names = (const char **)mymalloc(symtab->num_names * sizeof(char *), M_NAMES);
+        
+        for (int i = 0; i < symtab->num_names; i++) {
+            prog->var_names[i] = symtab->names[i] ? symtab->names[i] : "";
+        }
+    } else {
+        prog->num_var_names = 0;
+        prog->var_names = nullptr;
+    }
+    
+    return prog;
+}
+
+// Free minimal Program context
+static void free_minimal_program(Program *prog) {
+    if (prog) {
+        if (prog->var_names) {
+            myfree(prog->var_names, M_NAMES);
+        }
+        myfree(prog, M_PROGRAM);
+    }
+}
+
+// Helper function to convert Var to string for literal unparsing
+static char *var_to_string(Var v) {
+    char *result = nullptr;
+    
+    switch (v.type) {
+        case TYPE_INT:
+            result = (char *)mymalloc(32, M_STRING);
+            sprintf(result, "%lld", (long long)v.v.num);
+            break;
+            
+        case TYPE_FLOAT:
+            result = (char *)mymalloc(64, M_STRING);
+            sprintf(result, "%.17g", v.v.fnum);
+            break;
+            
+        case TYPE_STR:
+            // Need to escape and quote the string
+            result = (char *)mymalloc(strlen(v.v.str) * 2 + 3, M_STRING);  // Worst case: all chars need escaping + quotes
+            sprintf(result, "\"%s\"", v.v.str);  // Basic implementation - TODO: proper escaping
+            break;
+            
+        default:
+            result = (char *)mymalloc(16, M_STRING);
+            strcpy(result, "<?>");  // Unknown type placeholder
+            break;
+    }
+    
+    return result;
+}
+
+// Helper function to join argument lists with commas
+static char *join_args(Arg_List *args, Symtab *symtab) {
+    if (!args) {
+        char *result = (char *)mymalloc(1, M_STRING);
+        result[0] = '\0';
+        return result;
+    }
+    
+    // Calculate total size needed and build argument list
+    int total_size = 0;
+    int count = 0;
+    
+    // First pass: calculate size needed
+    for (Arg_List *arg = args; arg; arg = arg->next) {
+        char *arg_str = unparse_expr_to_string(arg->expr, symtab);
+        total_size += strlen(arg_str);
+        myfree(arg_str, M_STRING);
+        count++;
+        if (arg->next) total_size += 2; // ", " separator
+    }
+    
+    char *result = (char *)mymalloc(total_size + 1, M_STRING);
+    result[0] = '\0';
+    
+    // Second pass: build the string
+    int first = 1;
+    for (Arg_List *arg = args; arg; arg = arg->next) {
+        if (!first) {
+            strcat(result, ", ");
+        }
+        char *arg_str = unparse_expr_to_string(arg->expr, symtab);
+        strcat(result, arg_str);
+        myfree(arg_str, M_STRING);
+        first = 0;
+    }
+    
+    return result;
+}
+
+// Helper function to unparse a single expression to string
+static char *unparse_expr_to_string(Expr *expr, Symtab *symtab) {
+    if (!expr) {
+        char *result = (char *)mymalloc(1, M_STRING);
+        result[0] = '\0';
+        return result;
+    }
+    
+    char *result = nullptr;
+    
+    switch (expr->kind) {
+        case EXPR_VAR:
+            // Literal values
+            result = var_to_string(expr->e.var);
+            break;
+            
+        case EXPR_CALL: {
+            // Function call: func_name(args)
+            const char *func_name = name_func_by_num(expr->e.call.func);
+            char *args_str = join_args(expr->e.call.args, symtab);
+            
+            result = (char *)mymalloc(strlen(func_name) + strlen(args_str) + 3, M_STRING);
+            sprintf(result, "%s(%s)", func_name, args_str);
+            
+            myfree(args_str, M_STRING);
+            break;
+        }
+        
+        case EXPR_PLUS: {
+            // Arithmetic: lhs + rhs
+            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
+            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
+            
+            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 4, M_STRING);
+            sprintf(result, "%s + %s", lhs, rhs);
+            
+            myfree(lhs, M_STRING);
+            myfree(rhs, M_STRING);
+            break;
+        }
+        
+        case EXPR_MINUS: {
+            // Arithmetic: lhs - rhs
+            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
+            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
+            
+            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 4, M_STRING);
+            sprintf(result, "%s - %s", lhs, rhs);
+            
+            myfree(lhs, M_STRING);
+            myfree(rhs, M_STRING);
+            break;
+        }
+        
+        case EXPR_TIMES: {
+            // Arithmetic: lhs * rhs
+            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
+            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
+            
+            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 4, M_STRING);
+            sprintf(result, "%s * %s", lhs, rhs);
+            
+            myfree(lhs, M_STRING);
+            myfree(rhs, M_STRING);
+            break;
+        }
+        
+        case EXPR_DIVIDE: {
+            // Arithmetic: lhs / rhs
+            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
+            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
+            
+            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 4, M_STRING);
+            sprintf(result, "%s / %s", lhs, rhs);
+            
+            myfree(lhs, M_STRING);
+            myfree(rhs, M_STRING);
+            break;
+        }
+        
+        case EXPR_LIST: {
+            // List literal: {elem1, elem2, ...}
+            if (!expr->e.list) {
+                result = (char *)mymalloc(3, M_STRING);
+                strcpy(result, "{}");
+                break;
+            }
+            
+            // Use join_args to handle the argument list
+            char *elements_str = join_args(expr->e.list, symtab);
+            result = (char *)mymalloc(strlen(elements_str) + 3, M_STRING);
+            sprintf(result, "{%s}", elements_str);
+            myfree(elements_str, M_STRING);
+            break;
+        }
+        
+        default:
+            // Unimplemented expression type
+            result = (char *)mymalloc(32, M_STRING);
+            sprintf(result, "/* %s */", expr_type_names[expr->kind]);
+            break;
+    }
+    
+    return result;
+}
+
+// Helper function to unparse a single statement to string
+static char *unparse_single_stmt(Stmt *stmt, Symtab *symtab) {
+    if (!stmt) {
+        return nullptr;
+    }
+    
+    char *result = nullptr;
+    
+    switch (stmt->kind) {
+        case STMT_RETURN: {
+            if (stmt->s.expr) {
+                // return expr;
+                char *expr_str = unparse_expr_to_string(stmt->s.expr, symtab);
+                result = (char *)mymalloc(strlen(expr_str) + 9, M_STRING);
+                sprintf(result, "return %s;", expr_str);
+                myfree(expr_str, M_STRING);
+            } else {
+                // bare return;
+                result = (char *)mymalloc(8, M_STRING);
+                strcpy(result, "return;");
+            }
+            break;
+        }
+        
+        case STMT_EXPR: {
+            // Expression statement: expr;
+            char *expr_str = unparse_expr_to_string(stmt->s.expr, symtab);
+            result = (char *)mymalloc(strlen(expr_str) + 2, M_STRING);
+            sprintf(result, "%s;", expr_str);
+            myfree(expr_str, M_STRING);
+            break;
+        }
+        
+        default:
+            // Unimplemented statement type
+            result = (char *)mymalloc(64, M_STRING);
+            sprintf(result, "/* unimplemented stmt: %s */", stmt_type_names[stmt->kind]);
+            break;
+    }
+    
+    return result;
+}
+
+// Convert Stmt* to Var list - real implementation
+static Var unparse_stmt_to_var(Stmt *stmt, Symtab *symtab) {
+    if (!stmt) {
+        return new_list(0);  // Return empty list for null stmt
+    }
+    
+    // Handle statement sequences (linked list via next pointer)
+    Var lines = new_list(0);
+    int line_count = 0;
+    
+    for (Stmt *s = stmt; s; s = s->next) {
+        char *line = unparse_single_stmt(s, symtab);
+        if (line) {
+            line_count++;
+            lines = listinsert(lines, str_dup_to_var(line), line_count);
+            myfree(line, M_STRING);
+        }
+    }
+    
+    return lines;
+}
+
 /*********** AST Builtin Functions ***********/
 
 // Global variables to capture AST during parsing  
@@ -1033,9 +1343,6 @@ static void ast_capture_callback(Stmt *prog_start, Names *local_names, DB_Versio
         result = mapinsert(result, str_dup_to_var("variables"), var_names);
     }
     
-    // Mark as real AST
-    result = mapinsert(result, str_dup_to_var("real_ast"), Var::new_int(1));
-    
     // Clean up symbol table
     free_symtab(symtab);
     
@@ -1068,38 +1375,18 @@ Var parse_list_as_ast(Var code, Var *errors) {
     // Clear callback
     set_ast_capture_callback(NULL);
     
-    // DEBUG: Check what happened - MARKER SHOULD ALWAYS APPEAR
-    Var debug_result = new_map();
-    debug_result = mapinsert(debug_result, str_dup_to_var("debug_version"), Var::new_int(999));
-    debug_result = mapinsert(debug_result, str_dup_to_var("callback_fired"), 
-                           ast_capture_success ? Var::new_int(1) : Var::new_int(0));
-    debug_result = mapinsert(debug_result, str_dup_to_var("program_generated"), 
-                           program ? Var::new_int(1) : Var::new_int(0));
-    debug_result = mapinsert(debug_result, str_dup_to_var("ast_version"), Var::new_int(AST_SCHEMA_VERSION));
-    
-    if (program) {
-        debug_result = mapinsert(debug_result, str_dup_to_var("has_main_vector"), 
-                               program->main_vector.vector ? Var::new_int(1) : Var::new_int(0));
-        if (program->num_var_names > 0) {
-            Var var_names = new_list(program->num_var_names);
-            for (int i = 0; i < program->num_var_names; i++) {
-                var_names.v.list[i+1] = str_dup_to_var(program->var_names[i]);
-            }
-            debug_result = mapinsert(debug_result, str_dup_to_var("variables"), var_names);
-        }
-    }
-    
+    // Check if AST was captured successfully
     if (ast_capture_success && captured_ast.type != TYPE_NONE) {
-        // Return captured real AST
+        // Return captured AST
         Var result = captured_ast;
         captured_ast.type = TYPE_NONE; // Don't free it since we're returning it
         
         if (program) free_program(program);
         return result;
     } else {
-        // Callback didn't fire - return debug info for now
+        // Parse failed or callback didn't fire - return empty MAP
         if (program) free_program(program);
-        return debug_result;
+        return new_map();
     }
 }
 
@@ -1183,9 +1470,8 @@ static package bf_unparse_ast(Var arglist, Byte next, void *vdata, Objid progr) 
         return make_error_pack(E_INVARG);
     }
     
-    // TODO: Convert AST to code string using unparse.cc
-    // For now, return placeholder
-    Var result = str_dup_to_var("// AST conversion placeholder");
+    // Convert AST to code using wrapper function
+    Var result = unparse_stmt_to_var(stmt, symtab);
     
     end_code_allocation(0);  // Free entire AST pool
     free_symtab(symtab);

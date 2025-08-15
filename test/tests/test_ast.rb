@@ -67,9 +67,9 @@ class TestAst < Test::Unit::TestCase
 
   def test_enhanced_parse_ast_output
     run_test_as('wizard') do
-      # Test what the enhanced AST implementation returns
-      result = command("; ast = parse_ast({\"x = 1;\"}); return {ast[\"real_ast\"], ast[\"type\"], ast[\"ast_version\"]};")
-      puts "Enhanced AST output test:"
+      # Test what the AST implementation returns
+      result = command("; ast = parse_ast({\"x = 1;\"}); return {ast[\"type\"], ast[\"ast_version\"]};")
+      puts "AST structure test:"
       puts "Result: #{result.inspect}"
       
       # Just verify it returns something reasonable
