@@ -19,6 +19,7 @@
 #include "functions.h"
 #include "list.h"
 #include "map.h"
+#include "parser.h"
 #include "storage.h"
 #include "streams.h"
 #include "structures.h"
@@ -26,6 +27,18 @@
 
 // AST Schema Version - increment when breaking changes occur
 static const int AST_SCHEMA_VERSION = 1;
+
+// External parser globals 
+extern void *parser_data;
+extern Parser_Client parser_client;
+
+// Parser state structure (from parser.y)
+struct parser_state {
+    Var         code;           /* a list of strings */
+    int         cur_string;     /* which string? */
+    int         cur_char;       /* which character in that string? */
+    Var         errors;         /* a list of strings */
+};
 
 // Standard schema field names (lowercase for consistency)
 static const char *FIELD_TYPE = "type";
@@ -972,25 +985,84 @@ const char *symtab_get_name(Symtab *symtab, int id) {
 
 /*********** AST Builtin Functions ***********/
 
+// Forward declarations for parser integration
+extern Stmt *prog_start;  // Global from parser.y
+extern Names *local_names; // Global from parser.y  
+extern int nerrors;       // Global from parser.y
+extern DB_Version language_version; // Global from parser.y
+
+// Parser function from parser.h
+extern Program *parse_list_as_program(Var code, Var *errors);
+
 static package bf_parse_ast(Var arglist, Byte next, void *vdata, Objid progr) {
-    // TODO: Parse code string and return AST MAP
-    // For now, return placeholder error
-    return make_error_pack(E_PERM);
+    // Validate arguments: parse_ast(code_list)
+    if (arglist.v.list[0].v.num != 1) {
+        return make_error_pack(E_ARGS);
+    }
+    
+    Var code = arglist.v.list[1];
+    if (code.type != TYPE_LIST) {
+        free_var(arglist);
+        return make_error_pack(E_TYPE);
+    }
+    
+    // Check permissions (wizard-only for now)
+    if (!is_wizard(progr)) {
+        free_var(arglist);
+        return make_error_pack(E_PERM);
+    }
+    
+    // For now, use a simplified approach that just parses and returns basic info
+    // TODO: Implement actual AST capture when parser integration is complete
+    Var errors;
+    Program *program = parse_list_as_program(code, &errors);
+    
+    if (program && program->main_vector.vector) {
+        // Create basic AST representation from program structure
+        Var result = new_map();
+        result = mapinsert(result, str_dup_to_var("type"), str_dup_to_var("stmt_list"));
+        result = mapinsert(result, str_dup_to_var("ast_version"), Var::new_int(AST_SCHEMA_VERSION));
+        
+        // Add basic program info
+        if (program->num_var_names > 0) {
+            Var var_names = new_list(program->num_var_names);
+            for (int i = 0; i < program->num_var_names; i++) {
+                var_names.v.list[i+1] = str_dup_to_var(program->var_names[i]);
+            }
+            result = mapinsert(result, str_dup_to_var("variables"), var_names);
+        }
+        
+        // For now, return simplified structure indicating we parsed successfully
+        result = mapinsert(result, str_dup_to_var("simplified"), Var::new_int(1));
+        
+        free_program(program);
+        free_var(errors);
+        free_var(arglist);
+        return make_var_pack(result);
+    } else {
+        if (program) free_program(program);
+        free_var(errors);
+        free_var(arglist);
+        return make_error_pack(E_INVARG);
+    }
 }
 
 static package bf_unparse_ast(Var arglist, Byte next, void *vdata, Objid progr) {
     // Validate arguments
     if (arglist.v.list[0].v.num != 1) {
+        free_var(arglist);
         return make_error_pack(E_ARGS);
     }
     
     Var ast_map = arglist.v.list[1];
     if (ast_map.type != TYPE_MAP) {
+        free_var(arglist);
         return make_error_pack(E_TYPE);
     }
     
     // Validate AST MAP version
     if (!validate_version(ast_map)) {
+        free_var(arglist);
         return make_error_pack(E_INVARG);
     }
     
@@ -1019,16 +1091,19 @@ static package bf_unparse_ast(Var arglist, Byte next, void *vdata, Objid progr) 
 static package bf_validate_ast(Var arglist, Byte next, void *vdata, Objid progr) {
     // Validate arguments
     if (arglist.v.list[0].v.num != 1) {
+        free_var(arglist);
         return make_error_pack(E_ARGS);
     }
     
     Var ast_map = arglist.v.list[1];
     if (ast_map.type != TYPE_MAP) {
+        free_var(arglist);
         return make_var_pack(Var::new_int(0)); // Invalid
     }
     
     // Check version compatibility
     if (!validate_version(ast_map)) {
+        free_var(arglist);
         return make_var_pack(Var::new_int(0)); // Invalid
     }
     
@@ -1041,12 +1116,13 @@ static package bf_validate_ast(Var arglist, Byte next, void *vdata, Objid progr)
     
     end_code_allocation(0);  // Clean up
     free_symtab(symtab);
+    free_var(arglist);
     
     return make_var_pack(Var::new_int(is_valid));
 }
 
 void register_ast(void) {
-    register_function("parse_ast", 1, 1, bf_parse_ast, TYPE_STR);
+    register_function("parse_ast", 1, 1, bf_parse_ast, TYPE_LIST);
     register_function("unparse_ast", 1, 1, bf_unparse_ast, TYPE_MAP);
     register_function("validate_ast", 1, 1, bf_validate_ast, TYPE_MAP);
 }
