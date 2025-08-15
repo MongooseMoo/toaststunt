@@ -8,6 +8,8 @@
 #define AST_MAP_H
 
 #include "structures.h"
+#include "version.h"
+#include "sym_table.h"
 
 // Forward declarations
 struct Expr;
@@ -34,5 +36,8 @@ extern const char *symtab_get_name(Symtab *symtab, int id);
 
 // Builtin function registration
 extern void register_ast(void);
+
+// AST capture callback for parser integration  
+extern void set_ast_capture_callback(void (*callback)(struct Stmt *prog_start, Names *local_names, DB_Version version));
 
 #endif /* AST_MAP_H */

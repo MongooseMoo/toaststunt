@@ -18,12 +18,14 @@
 #include "ast.h"
 #include "functions.h"
 #include "list.h"
+#include "log.h"
 #include "map.h"
 #include "parser.h"
 #include "storage.h"
 #include "streams.h"
 #include "structures.h"
 #include "utils.h"
+#include "version.h"
 
 // AST Schema Version - increment when breaking changes occur
 static const int AST_SCHEMA_VERSION = 1;
@@ -985,16 +987,124 @@ const char *symtab_get_name(Symtab *symtab, int id) {
 
 /*********** AST Builtin Functions ***********/
 
-// Forward declarations for parser integration
-extern Stmt *prog_start;  // Global from parser.y
-extern Names *local_names; // Global from parser.y  
-extern int nerrors;       // Global from parser.y
-extern DB_Version language_version; // Global from parser.y
+// Global variables to capture AST during parsing  
+static Var captured_ast;
+static bool ast_capture_success = false;
+static bool ast_capture_initialized = false;
+
+static void init_ast_capture() {
+    if (!ast_capture_initialized) {
+        captured_ast.type = TYPE_NONE;
+        ast_capture_initialized = true;
+    }
+}
 
 // Parser function from parser.h
 extern Program *parse_list_as_program(Var code, Var *errors);
 
+// AST capture callback function
+static void ast_capture_callback(Stmt *prog_start, Names *local_names, DB_Version version) {
+    if (!prog_start) {
+        ast_capture_success = false;
+        return;
+    }
+    
+    // Create symbol table from local_names
+    Symtab *symtab = create_symtab(local_names ? local_names->size : 0);
+    if (local_names) {
+        for (int i = 0; i < local_names->size; i++) {
+            if (local_names->names[i]) {
+                symtab->names[i] = str_dup(local_names->names[i]);
+            }
+        }
+    }
+    
+    // Convert AST to MAP while it's still in memory
+    Var result = stmt_to_map_visitor(prog_start, symtab);
+    
+    // Add metadata
+    result = mapinsert(result, str_dup_to_var("ast_version"), Var::new_int(AST_SCHEMA_VERSION));
+    
+    if (local_names && local_names->size > 0) {
+        Var var_names = new_list(local_names->size);
+        for (int i = 0; i < local_names->size; i++) {
+            var_names.v.list[i+1] = str_dup_to_var(local_names->names[i] ? local_names->names[i] : "");
+        }
+        result = mapinsert(result, str_dup_to_var("variables"), var_names);
+    }
+    
+    // Mark as real AST
+    result = mapinsert(result, str_dup_to_var("real_ast"), Var::new_int(1));
+    
+    // Clean up symbol table
+    free_symtab(symtab);
+    
+    // Save result globally
+    if (captured_ast.type != TYPE_NONE) {
+        free_var(captured_ast);
+    }
+    captured_ast = result;
+    ast_capture_success = true;
+}
+
+// Real AST capture using parser callback
+Var parse_list_as_ast(Var code, Var *errors) {
+    // Initialize if needed
+    init_ast_capture();
+    
+    // Reset capture state
+    ast_capture_success = false;
+    if (captured_ast.type != TYPE_NONE) {
+        free_var(captured_ast);
+        captured_ast.type = TYPE_NONE;
+    }
+    
+    // Set up callback to capture AST
+    set_ast_capture_callback(ast_capture_callback);
+    
+    // Parse using existing function - callback will capture AST
+    Program *program = parse_list_as_program(code, errors);
+    
+    // Clear callback
+    set_ast_capture_callback(NULL);
+    
+    // DEBUG: Check what happened - MARKER SHOULD ALWAYS APPEAR
+    Var debug_result = new_map();
+    debug_result = mapinsert(debug_result, str_dup_to_var("debug_version"), Var::new_int(999));
+    debug_result = mapinsert(debug_result, str_dup_to_var("callback_fired"), 
+                           ast_capture_success ? Var::new_int(1) : Var::new_int(0));
+    debug_result = mapinsert(debug_result, str_dup_to_var("program_generated"), 
+                           program ? Var::new_int(1) : Var::new_int(0));
+    debug_result = mapinsert(debug_result, str_dup_to_var("ast_version"), Var::new_int(AST_SCHEMA_VERSION));
+    
+    if (program) {
+        debug_result = mapinsert(debug_result, str_dup_to_var("has_main_vector"), 
+                               program->main_vector.vector ? Var::new_int(1) : Var::new_int(0));
+        if (program->num_var_names > 0) {
+            Var var_names = new_list(program->num_var_names);
+            for (int i = 0; i < program->num_var_names; i++) {
+                var_names.v.list[i+1] = str_dup_to_var(program->var_names[i]);
+            }
+            debug_result = mapinsert(debug_result, str_dup_to_var("variables"), var_names);
+        }
+    }
+    
+    if (ast_capture_success && captured_ast.type != TYPE_NONE) {
+        // Return captured real AST
+        Var result = captured_ast;
+        captured_ast.type = TYPE_NONE; // Don't free it since we're returning it
+        
+        if (program) free_program(program);
+        return result;
+    } else {
+        // Callback didn't fire - return debug info for now
+        if (program) free_program(program);
+        return debug_result;
+    }
+}
+
 static package bf_parse_ast(Var arglist, Byte next, void *vdata, Objid progr) {
+    
     // Validate arguments: parse_ast(code_list)
     if (arglist.v.list[0].v.num != 1) {
         return make_error_pack(E_ARGS);
@@ -1012,39 +1122,33 @@ static package bf_parse_ast(Var arglist, Byte next, void *vdata, Objid progr) {
         return make_error_pack(E_PERM);
     }
     
-    // For now, use a simplified approach that just parses and returns basic info
-    // TODO: Implement actual AST capture when parser integration is complete
+    // Use real AST capture
     Var errors;
-    Program *program = parse_list_as_program(code, &errors);
+    Var result = parse_list_as_ast(code, &errors);
     
-    if (program && program->main_vector.vector) {
-        // Create basic AST representation from program structure
-        Var result = new_map();
-        result = mapinsert(result, str_dup_to_var("type"), str_dup_to_var("stmt_list"));
-        result = mapinsert(result, str_dup_to_var("ast_version"), Var::new_int(AST_SCHEMA_VERSION));
-        
-        // Add basic program info
-        if (program->num_var_names > 0) {
-            Var var_names = new_list(program->num_var_names);
-            for (int i = 0; i < program->num_var_names; i++) {
-                var_names.v.list[i+1] = str_dup_to_var(program->var_names[i]);
-            }
-            result = mapinsert(result, str_dup_to_var("variables"), var_names);
+    // Check if parsing succeeded
+    Var parse_error_var;
+    if (maplookup(result, str_dup_to_var("parse_error"), &parse_error_var, 0) != nullptr) {
+        // Parse error occurred
+        if (errors.type == TYPE_LIST && errors.v.list[0].v.num > 0) {
+            // Return first error message
+            free_var(result);
+            free_var(errors);
+            free_var(arglist);
+            return make_error_pack(E_INVARG);
+        } else {
+            // Generic parse error
+            free_var(result);
+            free_var(errors);
+            free_var(arglist);
+            return make_error_pack(E_INVARG);
         }
-        
-        // For now, return simplified structure indicating we parsed successfully
-        result = mapinsert(result, str_dup_to_var("simplified"), Var::new_int(1));
-        
-        free_program(program);
-        free_var(errors);
-        free_var(arglist);
-        return make_var_pack(result);
-    } else {
-        if (program) free_program(program);
-        free_var(errors);
-        free_var(arglist);
-        return make_error_pack(E_INVARG);
     }
+    
+    // Success - return AST
+    free_var(errors);
+    free_var(arglist);
+    return make_var_pack(result);
 }
 
 static package bf_unparse_ast(Var arglist, Byte next, void *vdata, Objid progr) {

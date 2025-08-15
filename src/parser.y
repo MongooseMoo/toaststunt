@@ -43,10 +43,14 @@
 #include "utils.h"
 #include "version.h"
 #include "waif.h"
+#include "ast_map.h"
 
 static Stmt            *prog_start;
 static int              dollars_ok;
 static DB_Version       language_version;
+
+// AST capture callback function pointer
+static void (*ast_capture_callback)(Stmt *prog_start, Names *local_names, DB_Version version) = NULL;
 
 static void     error(const char *, const char *);
 static void     warning(const char *, const char *);
@@ -1269,6 +1273,11 @@ parse_program(DB_Version version, Parser_Client c, void *data)
 	    }
 	}
 
+	// Call AST capture callback if registered (before generate_code destroys AST)
+	if (ast_capture_callback) {
+	    ast_capture_callback(prog_start, local_names, version);
+	}
+
 	prog = generate_code(prog_start, version);
 	prog->num_var_names = local_names->size;
 	prog->var_names = local_names->names;
@@ -1337,4 +1346,10 @@ parse_list_as_program(Var code, Var *errors)
     *errors = state.errors;
 
     return program;
+}
+
+// Function to set AST capture callback
+void set_ast_capture_callback(void (*callback)(Stmt *prog_start, Names *local_names, DB_Version version))
+{
+    ast_capture_callback = callback;
 }

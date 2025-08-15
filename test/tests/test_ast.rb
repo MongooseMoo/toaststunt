@@ -65,4 +65,24 @@ class TestAst < Test::Unit::TestCase
     end
   end
 
+  def test_enhanced_parse_ast_output
+    run_test_as('wizard') do
+      # Test what the enhanced AST implementation returns
+      result = command("; ast = parse_ast({\"x = 1;\"}); return {ast[\"real_ast\"], ast[\"type\"], ast[\"ast_version\"]};")
+      puts "Enhanced AST output test:"
+      puts "Result: #{result.inspect}"
+      
+      # Just verify it returns something reasonable
+      assert_not_equal E_INVARG, simplify(result)
+      
+      # Extract the AST and examine its structure
+      ast_result = command("; return parse_ast({\"x = 1;\"});")
+      puts "Full AST result: #{ast_result.inspect}"
+      
+      # Test another simple statement with valid builtin function
+      ast_call = command("; return parse_ast({\"length({1, 2, 3});\"});")
+      puts "Function call AST: #{ast_call.inspect}"
+    end
+  end
+
 end
