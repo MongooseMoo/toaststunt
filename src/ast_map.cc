@@ -302,7 +302,20 @@ static Var expr_to_map_visitor(Expr *expr, Symtab *symtab) {
                                expr_to_map_visitor(expr->e.verb.obj, symtab));
             result = mapinsert(result, str_dup_to_var("verb"), 
                                expr_to_map_visitor(expr->e.verb.verb, symtab));
-            // TODO: Convert args list
+            
+            // Convert arguments list to MAP format
+            if (expr->e.verb.args) {
+                Var args_list = new_list(0);
+                for (Arg_List *arg = expr->e.verb.args; arg != nullptr; arg = arg->next) {
+                    Var arg_map = new_map();
+                    arg_map = mapinsert(arg_map, str_dup_to_var("expr"), 
+                                       expr_to_map_visitor(arg->expr, symtab));
+                    arg_map = mapinsert(arg_map, str_dup_to_var("kind"), 
+                                       str_dup_to_var(arg->kind == ARG_NORMAL ? "normal" : "splice"));
+                    args_list = listappend(args_list, arg_map);
+                }
+                result = mapinsert(result, str_dup_to_var("args"), args_list);
+            }
             break;
             
         case EXPR_CALL:
@@ -662,8 +675,25 @@ static Expr *map_to_expr_visitor(Var map, Symtab *symtab) {
     
     // Create expression based on kind
     switch (kind) {
+        case EXPR_PROP: {
+            // Property access: obj.prop (uses "obj" and "prop" fields, not "lhs"/"rhs")
+            Var obj_field, prop_field;
+            if (maplookup(map, str_dup_to_var("obj"), &obj_field, 0) == nullptr ||
+                maplookup(map, str_dup_to_var("prop"), &prop_field, 0) == nullptr) {
+                return nullptr;
+            }
+            
+            Expr *obj = map_to_expr_visitor(obj_field, symtab);
+            Expr *prop = map_to_expr_visitor(prop_field, symtab);
+            
+            if (!obj || !prop) {
+                return nullptr; // Automatic cleanup via allocation pool
+            }
+            
+            return alloc_binary(EXPR_PROP, obj, prop);
+        }
+        
         case EXPR_ASGN:
-        case EXPR_PROP:
         case EXPR_PLUS:
         case EXPR_MINUS:
         case EXPR_TIMES:
@@ -695,9 +725,7 @@ static Expr *map_to_expr_visitor(Var map, Symtab *symtab) {
             Expr *rhs = map_to_expr_visitor(rhs_field, symtab);
             
             if (!lhs || !rhs) {
-                if (lhs) dealloc_node(lhs);
-                if (rhs) dealloc_node(rhs);
-                return nullptr;
+                return nullptr; // Automatic cleanup via allocation pool
             }
             
             return alloc_binary(kind, lhs, rhs);
@@ -755,13 +783,7 @@ static Expr *map_to_expr_visitor(Var map, Symtab *symtab) {
                         
                         Expr *expr = map_to_expr_visitor(expr_field, symtab);
                         if (!expr) {
-                            // Cleanup and return error
-                            while (args) {
-                                Arg_List *next = args->next;
-                                if (args->expr) dealloc_node(args->expr);
-                                myfree(args, M_AST);
-                                args = next;
-                            }
+                            // Automatic cleanup via allocation pool
                             return nullptr;
                         }
                         
@@ -817,10 +839,7 @@ static Expr *map_to_expr_visitor(Var map, Symtab *symtab) {
             Expr *alternate = map_to_expr_visitor(alternate_field, symtab);
             
             if (!condition || !consequent || !alternate) {
-                if (condition) dealloc_node(condition);
-                if (consequent) dealloc_node(consequent);
-                if (alternate) dealloc_node(alternate);
-                return nullptr;
+                return nullptr; // Automatic cleanup via allocation pool
             }
             
             Expr *result = alloc_expr(EXPR_COND);
@@ -876,13 +895,7 @@ static Expr *map_to_expr_visitor(Var map, Symtab *symtab) {
                 
                 Expr *expr = map_to_expr_visitor(expr_field, symtab);
                 if (!expr) {
-                    // Cleanup and return error
-                    while (arg_list) {
-                        Arg_List *next = arg_list->next;
-                        if (arg_list->expr) dealloc_node(arg_list->expr);
-                        myfree(arg_list, M_AST);
-                        arg_list = next;
-                    }
+                    // Automatic cleanup via allocation pool
                     return nullptr;
                 }
                 
@@ -899,6 +912,66 @@ static Expr *map_to_expr_visitor(Var map, Symtab *symtab) {
             
             Expr *result = alloc_expr(EXPR_LIST);
             result->e.list = arg_list;
+            return result;
+        }
+        
+        case EXPR_VERB: {
+            // Verb call: obj:verb(args)
+            Var obj_field, verb_field, args_field;
+            if (maplookup(map, str_dup_to_var("obj"), &obj_field, 0) == nullptr ||
+                maplookup(map, str_dup_to_var("verb"), &verb_field, 0) == nullptr) {
+                return nullptr;
+            }
+            
+            Expr *obj = map_to_expr_visitor(obj_field, symtab);
+            Expr *verb = map_to_expr_visitor(verb_field, symtab);
+            
+            if (!obj || !verb) {
+                return nullptr; // Automatic cleanup via allocation pool
+            }
+            
+            // Handle arguments (optional field)
+            Arg_List *args = nullptr;
+            if (maplookup(map, str_dup_to_var("args"), &args_field, 0) != nullptr) {
+                if (args_field.type == TYPE_LIST) {
+                    // Convert list of argument expressions
+                    Arg_List **last_ptr = &args;
+                    
+                    for (int i = 1; i <= args_field.v.list[0].v.num; i++) {
+                        Var arg_map = args_field.v.list[i];
+                        
+                        // Skip invalid arguments
+                        if (arg_map.type != TYPE_MAP) {
+                            continue;
+                        }
+                        
+                        // Get expression field from argument map
+                        Var expr_field;
+                        if (maplookup(arg_map, str_dup_to_var("expr"), &expr_field, 0) != nullptr) {
+                            Expr *expr = map_to_expr_visitor(expr_field, symtab);
+                            if (!expr) {
+                                // Automatic cleanup via allocation pool
+                                return nullptr;
+                            }
+                            
+                            // Create new Arg_List node
+                            Arg_List *new_arg = (Arg_List *)mymalloc(sizeof(Arg_List), M_AST);
+                            new_arg->expr = expr;
+                            new_arg->kind = ARG_NORMAL;
+                            new_arg->next = nullptr;
+                            
+                            // Add to list
+                            *last_ptr = new_arg;
+                            last_ptr = &new_arg->next;
+                        }
+                    }
+                }
+            }
+            
+            Expr *result = alloc_expr(EXPR_VERB);
+            result->e.verb.obj = obj;
+            result->e.verb.verb = verb;
+            result->e.verb.args = args;
             return result;
         }
         
@@ -972,25 +1045,20 @@ static Stmt *map_to_stmt_visitor(Var map, Symtab *symtab) {
             for (int i = 1; i <= arms_field.v.list[0].v.num; i++) {
                 Var arm_map = arms_field.v.list[i];
                 if (arm_map.type != TYPE_MAP) {
-                    free_stmt(result);
-                    return nullptr;
+                    return nullptr; // Automatic cleanup via allocation pool
                 }
                 
                 Var condition_field, stmt_field;
                 if (maplookup(arm_map, str_dup_to_var("condition"), &condition_field, 0) == nullptr ||
                     maplookup(arm_map, str_dup_to_var("stmt"), &stmt_field, 0) == nullptr) {
-                    free_stmt(result);
-                    return nullptr;
+                    return nullptr; // Automatic cleanup via allocation pool
                 }
                 
                 Expr *condition = map_to_expr_visitor(condition_field, symtab);
                 Stmt *stmt = map_to_stmt_visitor(stmt_field, symtab);
                 
                 if (!condition || !stmt) {
-                    if (condition) dealloc_node(condition);
-                    if (stmt) free_stmt(stmt);
-                    free_stmt(result);
-                    return nullptr;
+                    return nullptr; // Automatic cleanup via allocation pool
                 }
                 
                 *arm_ptr = alloc_cond_arm(condition, stmt);
@@ -1003,8 +1071,7 @@ static Stmt *map_to_stmt_visitor(Var map, Symtab *symtab) {
                 otherwise_field.type != TYPE_NONE) {
                 result->s.cond.otherwise = map_to_stmt_visitor(otherwise_field, symtab);
                 if (!result->s.cond.otherwise) {
-                    free_stmt(result);
-                    return nullptr;
+                    return nullptr; // Automatic cleanup via allocation pool
                 }
             }
             
@@ -1025,9 +1092,7 @@ static Stmt *map_to_stmt_visitor(Var map, Symtab *symtab) {
             Stmt *body = map_to_stmt_visitor(body_field, symtab);
             
             if (!condition || !body) {
-                if (condition) dealloc_node(condition);
-                if (body) free_stmt(body);
-                return nullptr;
+                return nullptr; // Automatic cleanup via allocation pool
             }
             
             Stmt *result = alloc_stmt(STMT_WHILE);
@@ -1064,8 +1129,7 @@ static Stmt *map_to_stmt_visitor(Var map, Symtab *symtab) {
             if (expr_field.type != TYPE_NONE) {
                 result->s.expr = map_to_expr_visitor(expr_field, symtab);
                 if (!result->s.expr) {
-                    free_stmt(result);
-                    return nullptr;
+                    return nullptr; // Automatic cleanup via allocation pool
                 }
             } else {
                 result->s.expr = nullptr;

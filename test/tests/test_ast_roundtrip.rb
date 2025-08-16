@@ -201,4 +201,23 @@ class TestAstRoundTrip < Test::Unit::TestCase
     end
   end
 
+  # TDD PHASE 4: Property and verb access
+  def test_property_access
+    run_test_as("wizard") do
+      validate_and_roundtrip("Property access", "return player.name;")
+    end
+  end
+
+  def test_verb_call_no_args
+    run_test_as("wizard") do
+      validate_and_roundtrip("Verb call no args", "return player:tell();")
+    end
+  end
+
+  def test_verb_call_with_args
+    run_test_as("wizard") do
+      validate_and_roundtrip("Verb call with args", "return player:tell(42);")
+    end
+  end
+
 end
