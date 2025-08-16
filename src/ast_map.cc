@@ -29,7 +29,6 @@
 #include "version.h"
 
 // Forward declarations
-static char *unparse_expr_to_string(Expr *expr, Symtab *symtab);
 
 // AST Schema Version - increment when breaking changes occur
 static const int AST_SCHEMA_VERSION = 1;
@@ -49,7 +48,7 @@ struct parser_state {
 // Standard schema field names (lowercase for consistency)
 static const char *FIELD_TYPE = "type";
 static const char *FIELD_VERSION = "ast_version";
-static const char *FIELD_SYMTAB = "symtab";
+static const char *FIELD_SYMTAB = "variables";
 
 // Size constants for arrays (match enum sizes)
 static const int SizeOf_Stmt_Kind = 11; // STMT_COND through STMT_CONTINUE
@@ -127,33 +126,36 @@ static Var symtab_to_list(Symtab *symtab) {
     return list;
 }
 
-// Convert MOO LIST of STRs back to symbol table
+// Convert LIST back to Symtab
 static Symtab *list_to_symtab(Var list) {
     if (list.type != TYPE_LIST) {
-        return nullptr;
+        return create_symtab(0); // Return empty symtab on error
     }
     
     int num_names = list.v.list[0].v.num;
-    if (num_names == 0) {
-        return nullptr; // Empty symbol table
-    }
-    
-    Symtab *symtab = (Symtab *)mymalloc(sizeof(Symtab), M_AST);
-    symtab->num_names = num_names;
-    symtab->names = (char **)mymalloc(num_names * sizeof(char *), M_AST);
+    Symtab *symtab = create_symtab(num_names);
     
     for (int i = 0; i < num_names; i++) {
-        if (list.v.list[i + 1].type != TYPE_STR) {
-            // Invalid symbol table format
-            myfree(symtab->names, M_AST);
-            myfree(symtab, M_AST);
-            return nullptr;
+        if (list.v.list[i + 1].type == TYPE_STR) {
+            symtab->names[i] = str_dup(list.v.list[i + 1].v.str);
+        } else {
+            symtab->names[i] = str_dup(""); // Fallback for invalid entries
         }
-        symtab->names[i] = str_dup(list.v.list[i + 1].v.str);
     }
     
     return symtab;
 }
+
+// Extract symbol table from AST MAP
+static Symtab *extract_symtab_from_map(Var map) {
+    Var symtab_var;
+    if (maplookup(map, str_dup_to_var(FIELD_SYMTAB), &symtab_var, 0) == nullptr) {
+        return create_symtab(0); // No symtab field, return empty
+    }
+    
+    return list_to_symtab(symtab_var);
+}
+
 
 /*********** Validation Helpers ***********/
 
@@ -1208,310 +1210,9 @@ static void free_minimal_program(Program *prog) {
     }
 }
 
-// Helper function to convert Var to string for literal unparsing
-static char *var_to_string(Var v) {
-    char *result = nullptr;
-    
-    switch (v.type) {
-        case TYPE_INT:
-            result = (char *)mymalloc(32, M_STRING);
-            sprintf(result, "%lld", (long long)v.v.num);
-            break;
-            
-        case TYPE_FLOAT:
-            result = (char *)mymalloc(64, M_STRING);
-            sprintf(result, "%.17g", v.v.fnum);
-            break;
-            
-        case TYPE_STR:
-            // Need to escape and quote the string
-            result = (char *)mymalloc(strlen(v.v.str) * 2 + 3, M_STRING);  // Worst case: all chars need escaping + quotes
-            sprintf(result, "\"%s\"", v.v.str);  // Basic implementation - TODO: proper escaping
-            break;
-            
-        default:
-            result = (char *)mymalloc(16, M_STRING);
-            strcpy(result, "<?>");  // Unknown type placeholder
-            break;
-    }
-    
-    return result;
-}
+// Helper functions removed - now using integrated unparse.cc functionality
 
-// Helper function to join argument lists with commas
-static char *join_args(Arg_List *args, Symtab *symtab) {
-    if (!args) {
-        char *result = (char *)mymalloc(1, M_STRING);
-        result[0] = '\0';
-        return result;
-    }
-    
-    // Calculate total size needed and build argument list
-    int total_size = 0;
-    int count = 0;
-    
-    // First pass: calculate size needed
-    for (Arg_List *arg = args; arg; arg = arg->next) {
-        char *arg_str = unparse_expr_to_string(arg->expr, symtab);
-        total_size += strlen(arg_str);
-        myfree(arg_str, M_STRING);
-        count++;
-        if (arg->next) total_size += 2; // ", " separator
-    }
-    
-    char *result = (char *)mymalloc(total_size + 1, M_STRING);
-    result[0] = '\0';
-    
-    // Second pass: build the string
-    int first = 1;
-    for (Arg_List *arg = args; arg; arg = arg->next) {
-        if (!first) {
-            strcat(result, ", ");
-        }
-        char *arg_str = unparse_expr_to_string(arg->expr, symtab);
-        strcat(result, arg_str);
-        myfree(arg_str, M_STRING);
-        first = 0;
-    }
-    
-    return result;
-}
-
-// Helper function to unparse a single expression to string
-static char *unparse_expr_to_string(Expr *expr, Symtab *symtab) {
-    if (!expr) {
-        char *result = (char *)mymalloc(1, M_STRING);
-        result[0] = '\0';
-        return result;
-    }
-    
-    char *result = nullptr;
-    
-    switch (expr->kind) {
-        case EXPR_VAR:
-            // Literal values
-            result = var_to_string(expr->e.var);
-            break;
-            
-        case EXPR_CALL: {
-            // Function call: func_name(args)
-            const char *func_name = name_func_by_num(expr->e.call.func);
-            char *args_str = join_args(expr->e.call.args, symtab);
-            
-            result = (char *)mymalloc(strlen(func_name) + strlen(args_str) + 3, M_STRING);
-            sprintf(result, "%s(%s)", func_name, args_str);
-            
-            myfree(args_str, M_STRING);
-            break;
-        }
-        
-        case EXPR_PLUS: {
-            // Arithmetic: lhs + rhs
-            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
-            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
-            
-            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 4, M_STRING);
-            sprintf(result, "%s + %s", lhs, rhs);
-            
-            myfree(lhs, M_STRING);
-            myfree(rhs, M_STRING);
-            break;
-        }
-        
-        case EXPR_MINUS: {
-            // Arithmetic: lhs - rhs
-            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
-            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
-            
-            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 4, M_STRING);
-            sprintf(result, "%s - %s", lhs, rhs);
-            
-            myfree(lhs, M_STRING);
-            myfree(rhs, M_STRING);
-            break;
-        }
-        
-        case EXPR_TIMES: {
-            // Arithmetic: lhs * rhs
-            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
-            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
-            
-            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 4, M_STRING);
-            sprintf(result, "%s * %s", lhs, rhs);
-            
-            myfree(lhs, M_STRING);
-            myfree(rhs, M_STRING);
-            break;
-        }
-        
-        case EXPR_DIVIDE: {
-            // Arithmetic: lhs / rhs
-            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
-            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
-            
-            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 4, M_STRING);
-            sprintf(result, "%s / %s", lhs, rhs);
-            
-            myfree(lhs, M_STRING);
-            myfree(rhs, M_STRING);
-            break;
-        }
-        
-        case EXPR_LIST: {
-            // List literal: {elem1, elem2, ...}
-            if (!expr->e.list) {
-                result = (char *)mymalloc(3, M_STRING);
-                strcpy(result, "{}");
-                break;
-            }
-            
-            // Use join_args to handle the argument list
-            char *elements_str = join_args(expr->e.list, symtab);
-            result = (char *)mymalloc(strlen(elements_str) + 3, M_STRING);
-            sprintf(result, "{%s}", elements_str);
-            myfree(elements_str, M_STRING);
-            break;
-        }
-        
-        case EXPR_EQ: {
-            // Equality: lhs == rhs
-            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
-            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
-            
-            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 5, M_STRING);
-            sprintf(result, "%s == %s", lhs, rhs);
-            
-            myfree(lhs, M_STRING);
-            myfree(rhs, M_STRING);
-            break;
-        }
-        
-        case EXPR_NE: {
-            // Inequality: lhs != rhs
-            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
-            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
-            
-            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 5, M_STRING);
-            sprintf(result, "%s != %s", lhs, rhs);
-            
-            myfree(lhs, M_STRING);
-            myfree(rhs, M_STRING);
-            break;
-        }
-        
-        case EXPR_LT: {
-            // Less than: lhs < rhs
-            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
-            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
-            
-            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 4, M_STRING);
-            sprintf(result, "%s < %s", lhs, rhs);
-            
-            myfree(lhs, M_STRING);
-            myfree(rhs, M_STRING);
-            break;
-        }
-        
-        case EXPR_LE: {
-            // Less or equal: lhs <= rhs
-            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
-            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
-            
-            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 5, M_STRING);
-            sprintf(result, "%s <= %s", lhs, rhs);
-            
-            myfree(lhs, M_STRING);
-            myfree(rhs, M_STRING);
-            break;
-        }
-        
-        case EXPR_GT: {
-            // Greater than: lhs > rhs
-            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
-            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
-            
-            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 4, M_STRING);
-            sprintf(result, "%s > %s", lhs, rhs);
-            
-            myfree(lhs, M_STRING);
-            myfree(rhs, M_STRING);
-            break;
-        }
-        
-        case EXPR_GE: {
-            // Greater or equal: lhs >= rhs
-            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
-            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
-            
-            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 5, M_STRING);
-            sprintf(result, "%s >= %s", lhs, rhs);
-            
-            myfree(lhs, M_STRING);
-            myfree(rhs, M_STRING);
-            break;
-        }
-        
-        case EXPR_AND: {
-            // Logical AND: lhs && rhs
-            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
-            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
-            
-            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 5, M_STRING);
-            sprintf(result, "%s && %s", lhs, rhs);
-            
-            myfree(lhs, M_STRING);
-            myfree(rhs, M_STRING);
-            break;
-        }
-        
-        case EXPR_OR: {
-            // Logical OR: lhs || rhs
-            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
-            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
-            
-            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 5, M_STRING);
-            sprintf(result, "%s || %s", lhs, rhs);
-            
-            myfree(lhs, M_STRING);
-            myfree(rhs, M_STRING);
-            break;
-        }
-        
-        case EXPR_NOT: {
-            // Logical NOT: !expr
-            char *expr_str = unparse_expr_to_string(expr->e.expr, symtab);
-            
-            result = (char *)mymalloc(strlen(expr_str) + 2, M_STRING);
-            sprintf(result, "!%s", expr_str);
-            
-            myfree(expr_str, M_STRING);
-            break;
-        }
-        
-        case EXPR_COND: {
-            // Conditional expression: condition ? consequent | alternate
-            char *condition_str = unparse_expr_to_string(expr->e.cond.condition, symtab);
-            char *consequent_str = unparse_expr_to_string(expr->e.cond.consequent, symtab);
-            char *alternate_str = unparse_expr_to_string(expr->e.cond.alternate, symtab);
-            
-            result = (char *)mymalloc(strlen(condition_str) + strlen(consequent_str) + strlen(alternate_str) + 6, M_STRING);
-            sprintf(result, "%s ? %s | %s", condition_str, consequent_str, alternate_str);
-            
-            myfree(condition_str, M_STRING);
-            myfree(consequent_str, M_STRING);
-            myfree(alternate_str, M_STRING);
-            break;
-        }
-        
-        default:
-            // Unimplemented expression type
-            result = (char *)mymalloc(32, M_STRING);
-            sprintf(result, "/* %s */", expr_type_names[expr->kind]);
-            break;
-    }
-    
-    return result;
-}
+// Expression unparsing now handled by unparse.cc integration
 
 // Helper function to unparse a single statement to string
 static char *unparse_single_stmt(Stmt *stmt, Symtab *symtab) {
@@ -1740,8 +1441,8 @@ static package bf_unparse_ast(Var arglist, Byte next, void *vdata, Objid progr) 
         return make_error_pack(E_INVARG);
     }
     
-    // Create temporary symbol table (empty for now)
-    Symtab *symtab = create_symtab(0);
+    // Extract symbol table from AST MAP
+    Symtab *symtab = extract_symtab_from_map(ast_map);
     
     // Allocate AST in temporary pool 
     begin_code_allocation();

@@ -23,6 +23,8 @@
 #include "config.h"
 #include "program.h"
 #include "structures.h"
+#include "ast.h"
+#include "ast_map.h"
 
 typedef void (*Unparser_Receiver) (void *, const char *);
 
@@ -41,5 +43,7 @@ extern const char *unparse_error(enum error);	/* E_NONE -> "No error" */
 
 extern int parse_error(const char *error);	/* "E_NONE" -> E_NONE */
 extern const char* parse_type(var_type);
+
+extern char *unparse_expr_to_string(Expr *expr, Symtab *symtab);
 
 #endif
