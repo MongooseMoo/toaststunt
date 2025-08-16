@@ -132,4 +132,41 @@ class TestAstRoundTrip < Test::Unit::TestCase
     end
   end
 
+  # TDD RED PHASE: Comparison operators (expected to fail initially)
+  def test_comparison_equality
+    run_test_as("wizard") do
+      validate_and_roundtrip("Equality", "return 1 == 2;")
+    end
+  end
+
+  def test_comparison_inequality 
+    run_test_as("wizard") do
+      validate_and_roundtrip("Inequality", "return 1 != 2;")
+    end
+  end
+
+  def test_comparison_less_than
+    run_test_as("wizard") do
+      validate_and_roundtrip("Less than", "return 1 < 2;")
+    end
+  end
+
+  def test_comparison_less_equal
+    run_test_as("wizard") do
+      validate_and_roundtrip("Less or equal", "return 1 <= 2;")
+    end
+  end
+
+  def test_comparison_greater_than
+    run_test_as("wizard") do
+      validate_and_roundtrip("Greater than", "return 1 > 2;")
+    end
+  end
+
+  def test_comparison_greater_equal
+    run_test_as("wizard") do
+      validate_and_roundtrip("Greater or equal", "return 1 >= 2;")
+    end
+  end
+
 end

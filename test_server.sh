@@ -9,13 +9,14 @@ DEFAULT_PORT=9898
 
 # Function to show usage
 usage() {
-    echo "Usage: $0 {start|stop|restart|status|test} [port]"
+    echo "Usage: $0 {start|stop|restart|status|test} [test_file] [port]"
     echo "Commands:"
     echo "  start   - Start test server (default port: $DEFAULT_PORT)"
     echo "  stop    - Stop test server"
     echo "  restart - Restart test server"  
     echo "  status  - Check server status"
-    echo "  test    - Run AST tests (starts server if needed)"
+    echo "  test    - Run tests (starts server if needed)"
+    echo "            Optional: specify test file (e.g., test/tests/test_ast_roundtrip.rb)"
     echo "  logs    - Show recent server logs"
     exit 1
 }
@@ -93,15 +94,29 @@ check_status() {
 
 # Function to run tests
 run_tests() {
+    local test_file="$1"
+    
     echo "Ensuring server is running..."
     if ! check_status > /dev/null 2>&1; then
         start_server
         sleep 3  # Give server time to fully start
     fi
     
-    echo "Running AST tests..."
+    echo "Running tests..."
     cd "$TEST_DIR"
-    PATH="$HOME/.rbenv/bin:$PATH" make test_ast
+    
+    if [ -n "$test_file" ]; then
+        # Run specific test file
+        echo "Running specific test: $test_file"
+        if [[ "$test_file" == *"roundtrip"* ]]; then
+            PATH="$HOME/.rbenv/bin:$PATH" make test_ast_roundtrip
+        else
+            PATH="$HOME/.rbenv/bin:$PATH" ruby "$test_file"
+        fi
+    else
+        # Run default AST tests
+        PATH="$HOME/.rbenv/bin:$PATH" make test_ast
+    fi
 }
 
 # Function to show logs
@@ -131,7 +146,7 @@ case "${1:-}" in
         check_status
         ;;
     test)
-        run_tests
+        run_tests "$2"
         ;;
     logs)
         show_logs

@@ -1373,6 +1373,84 @@ static char *unparse_expr_to_string(Expr *expr, Symtab *symtab) {
             break;
         }
         
+        case EXPR_EQ: {
+            // Equality: lhs == rhs
+            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
+            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
+            
+            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 5, M_STRING);
+            sprintf(result, "%s == %s", lhs, rhs);
+            
+            myfree(lhs, M_STRING);
+            myfree(rhs, M_STRING);
+            break;
+        }
+        
+        case EXPR_NE: {
+            // Inequality: lhs != rhs
+            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
+            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
+            
+            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 5, M_STRING);
+            sprintf(result, "%s != %s", lhs, rhs);
+            
+            myfree(lhs, M_STRING);
+            myfree(rhs, M_STRING);
+            break;
+        }
+        
+        case EXPR_LT: {
+            // Less than: lhs < rhs
+            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
+            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
+            
+            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 4, M_STRING);
+            sprintf(result, "%s < %s", lhs, rhs);
+            
+            myfree(lhs, M_STRING);
+            myfree(rhs, M_STRING);
+            break;
+        }
+        
+        case EXPR_LE: {
+            // Less or equal: lhs <= rhs
+            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
+            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
+            
+            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 5, M_STRING);
+            sprintf(result, "%s <= %s", lhs, rhs);
+            
+            myfree(lhs, M_STRING);
+            myfree(rhs, M_STRING);
+            break;
+        }
+        
+        case EXPR_GT: {
+            // Greater than: lhs > rhs
+            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
+            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
+            
+            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 4, M_STRING);
+            sprintf(result, "%s > %s", lhs, rhs);
+            
+            myfree(lhs, M_STRING);
+            myfree(rhs, M_STRING);
+            break;
+        }
+        
+        case EXPR_GE: {
+            // Greater or equal: lhs >= rhs
+            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
+            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
+            
+            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 5, M_STRING);
+            sprintf(result, "%s >= %s", lhs, rhs);
+            
+            myfree(lhs, M_STRING);
+            myfree(rhs, M_STRING);
+            break;
+        }
+        
         default:
             // Unimplemented expression type
             result = (char *)mymalloc(32, M_STRING);
