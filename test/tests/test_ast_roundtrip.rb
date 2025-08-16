@@ -169,4 +169,23 @@ class TestAstRoundTrip < Test::Unit::TestCase
     end
   end
 
+  # TDD PHASE 2 RED: Logical operators (expected to fail initially)
+  def test_logical_and
+    run_test_as("wizard") do
+      validate_and_roundtrip("Logical AND", "return 1 && 2;")
+    end
+  end
+
+  def test_logical_or
+    run_test_as("wizard") do
+      validate_and_roundtrip("Logical OR", "return 1 || 2;")
+    end
+  end
+
+  def test_logical_not
+    run_test_as("wizard") do
+      validate_and_roundtrip("Logical NOT", "return !1;")
+    end
+  end
+
 end

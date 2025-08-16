@@ -1451,6 +1451,43 @@ static char *unparse_expr_to_string(Expr *expr, Symtab *symtab) {
             break;
         }
         
+        case EXPR_AND: {
+            // Logical AND: lhs && rhs
+            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
+            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
+            
+            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 5, M_STRING);
+            sprintf(result, "%s && %s", lhs, rhs);
+            
+            myfree(lhs, M_STRING);
+            myfree(rhs, M_STRING);
+            break;
+        }
+        
+        case EXPR_OR: {
+            // Logical OR: lhs || rhs
+            char *lhs = unparse_expr_to_string(expr->e.bin.lhs, symtab);
+            char *rhs = unparse_expr_to_string(expr->e.bin.rhs, symtab);
+            
+            result = (char *)mymalloc(strlen(lhs) + strlen(rhs) + 5, M_STRING);
+            sprintf(result, "%s || %s", lhs, rhs);
+            
+            myfree(lhs, M_STRING);
+            myfree(rhs, M_STRING);
+            break;
+        }
+        
+        case EXPR_NOT: {
+            // Logical NOT: !expr
+            char *expr_str = unparse_expr_to_string(expr->e.expr, symtab);
+            
+            result = (char *)mymalloc(strlen(expr_str) + 2, M_STRING);
+            sprintf(result, "!%s", expr_str);
+            
+            myfree(expr_str, M_STRING);
+            break;
+        }
+        
         default:
             // Unimplemented expression type
             result = (char *)mymalloc(32, M_STRING);
