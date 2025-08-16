@@ -1441,24 +1441,22 @@ static package bf_unparse_ast(Var arglist, Byte next, void *vdata, Objid progr) 
         return make_error_pack(E_INVARG);
     }
     
-    // Extract symbol table from AST MAP
-    Symtab *symtab = extract_symtab_from_map(ast_map);
-    
     // Allocate AST in temporary pool 
     begin_code_allocation();
     
+    // Extract symbol table from AST MAP (after starting allocation tracking)
+    Symtab *symtab = extract_symtab_from_map(ast_map);
+    
     Stmt *stmt = map_to_stmt(ast_map, symtab);
     if (!stmt) {
-        end_code_allocation(0);  // Clean up on error
-        free_symtab(symtab);
+        end_code_allocation(1);  // Abort and clean up everything
         return make_error_pack(E_INVARG);
     }
     
-    // Convert AST to code using wrapper function
+    // Convert AST to code using existing unparse infrastructure
     Var result = unparse_stmt_to_var(stmt, symtab);
     
-    end_code_allocation(0);  // Free entire AST pool
-    free_symtab(symtab);
+    end_code_allocation(1);  // Abort and clean up everything including symtab
     return make_var_pack(result);
 }
 

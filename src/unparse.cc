@@ -893,27 +893,33 @@ unparse_expr_to_string(Expr *expr, Symtab *symtab)
         return str_dup("");
     }
 
-    // Create minimal Program with variable names from symbol table
-    Program *temp_program = program_ref(null_program());
-    
-    // Save original var_names to restore later
-    const char **orig_var_names = temp_program->var_names;
-    unsigned orig_num_var_names = temp_program->num_var_names;
-    
-    if (symtab && symtab->num_names > 0) {
-        temp_program->num_var_names = symtab->num_names;
-        temp_program->var_names = (const char **)mymalloc(symtab->num_names * sizeof(char *), M_NAMES);
-        
-        for (int i = 0; i < symtab->num_names; i++) {
-            temp_program->var_names[i] = symtab->names[i] ? symtab->names[i] : "";
-        }
-    }
-
     // Save current global state
     Program *saved_prog = prog;
     
+    // Create minimal program structure on stack - no AST allocation needed  
+    Program temp_program;
+    memset(&temp_program, 0, sizeof(Program));
+    temp_program.version = DBV_Prehistory;  // Set minimal valid DB version
+    
+    // Set up variable names from symbol table if provided
+    if (symtab && symtab->num_names > 0) {
+        temp_program.num_var_names = symtab->num_names;
+        temp_program.var_names = (const char **)mymalloc(symtab->num_names * sizeof(char *), M_NAMES);
+        
+        for (int i = 0; i < symtab->num_names; i++) {
+            temp_program.var_names[i] = symtab->names[i] ? symtab->names[i] : "";
+        }
+    } else {
+        temp_program.num_var_names = 0;
+        temp_program.var_names = nullptr;
+    }
+    
     // Set our temporary program as global
-    prog = temp_program;
+    prog = &temp_program;
+    
+    // Initialize expression tables if not already done
+    if (!expr_tables_initialized)
+        init_expr_tables();
     
     // Create stream and unparse the expression
     Stream *str = new_stream(100);
@@ -926,15 +932,10 @@ unparse_expr_to_string(Expr *expr, Symtab *symtab)
     free_stream(str);
     prog = saved_prog;  // Restore previous global state
     
-    // Restore original var_names and clean up our temporary allocation
+    // Clean up our temporary allocation
     if (symtab && symtab->num_names > 0) {
-        myfree(temp_program->var_names, M_NAMES);
+        myfree(temp_program.var_names, M_NAMES);
     }
-    temp_program->var_names = orig_var_names;
-    temp_program->num_var_names = orig_num_var_names;
-    
-    // Clean up our temporary program
-    free_program(temp_program);
     
     return result;
 }
