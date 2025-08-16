@@ -1488,6 +1488,21 @@ static char *unparse_expr_to_string(Expr *expr, Symtab *symtab) {
             break;
         }
         
+        case EXPR_COND: {
+            // Conditional expression: condition ? consequent | alternate
+            char *condition_str = unparse_expr_to_string(expr->e.cond.condition, symtab);
+            char *consequent_str = unparse_expr_to_string(expr->e.cond.consequent, symtab);
+            char *alternate_str = unparse_expr_to_string(expr->e.cond.alternate, symtab);
+            
+            result = (char *)mymalloc(strlen(condition_str) + strlen(consequent_str) + strlen(alternate_str) + 6, M_STRING);
+            sprintf(result, "%s ? %s | %s", condition_str, consequent_str, alternate_str);
+            
+            myfree(condition_str, M_STRING);
+            myfree(consequent_str, M_STRING);
+            myfree(alternate_str, M_STRING);
+            break;
+        }
+        
         default:
             // Unimplemented expression type
             result = (char *)mymalloc(32, M_STRING);

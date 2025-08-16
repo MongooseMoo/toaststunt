@@ -188,4 +188,17 @@ class TestAstRoundTrip < Test::Unit::TestCase
     end
   end
 
+  # TDD PHASE 3 RED: Conditional expressions (expected to fail initially)
+  def test_conditional_expression
+    run_test_as("wizard") do
+      validate_and_roundtrip("Conditional expression", "return 1 ? 2 | 3;")
+    end
+  end
+
+  def test_conditional_expression_complex
+    run_test_as("wizard") do
+      validate_and_roundtrip("Complex conditional", "return (1 == 2) ? 42 | 0;")
+    end
+  end
+
 end
