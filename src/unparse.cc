@@ -939,3 +939,97 @@ unparse_expr_to_string(Expr *expr, Symtab *symtab)
     
     return result;
 }
+
+// String collector for unparse_stmt_to_string
+typedef struct {
+    char *result;
+    int length;
+    int allocated;
+} string_collector;
+
+static void collect_stmt_line(void *data, const char *line) {
+    string_collector *collector = (string_collector *)data;
+    int line_len = strlen(line);
+    int new_len = collector->length + line_len + 1; // +1 for newline
+    
+    // Expand buffer if needed
+    if (new_len >= collector->allocated) {
+        collector->allocated = new_len * 2;
+        collector->result = (char *)myrealloc(collector->result, collector->allocated, M_STRING);
+    }
+    
+    // Append line with newline
+    strcpy(collector->result + collector->length, line);
+    collector->length += line_len;
+    collector->result[collector->length] = '\n';
+    collector->length++;
+    collector->result[collector->length] = '\0';
+}
+
+char *
+unparse_stmt_to_string(Stmt *stmt, Symtab *symtab)
+{
+    if (!stmt) {
+        return str_dup("");
+    }
+    
+    // Save current global state
+    Program *saved_prog = prog;
+    Unparser_Receiver saved_receiver = receiver;
+    void *saved_receiver_data = receiver_data;
+    
+    // Create minimal program structure on stack - no AST allocation needed  
+    Program temp_program;
+    memset(&temp_program, 0, sizeof(Program));
+    temp_program.version = DBV_Prehistory;  // Set minimal valid DB version
+    
+    // Set up variable names from symbol table if provided
+    if (symtab && symtab->num_names > 0) {
+        temp_program.num_var_names = symtab->num_names;
+        temp_program.var_names = (const char **)mymalloc(symtab->num_names * sizeof(char *), M_NAMES);
+        
+        for (int i = 0; i < symtab->num_names; i++) {
+            temp_program.var_names[i] = symtab->names[i] ? symtab->names[i] : "";
+        }
+    } else {
+        temp_program.num_var_names = 0;
+        temp_program.var_names = nullptr;
+    }
+    
+    // Set our temporary program as global
+    prog = &temp_program;
+    
+    // Initialize expression tables if not already done
+    if (!expr_tables_initialized)
+        init_expr_tables();
+    
+    // Set up string collector
+    string_collector collector;
+    collector.result = (char *)mymalloc(1000, M_STRING);
+    collector.result[0] = '\0';
+    collector.length = 0;
+    collector.allocated = 1000;
+    
+    receiver = collect_stmt_line;
+    receiver_data = &collector;
+    
+    // Unparse the statement 
+    unparse_stmt(stmt, 0);
+    
+    // Remove trailing newline if present
+    if (collector.length > 0 && collector.result[collector.length - 1] == '\n') {
+        collector.result[collector.length - 1] = '\0';
+    }
+    
+    // Restore globals
+    prog = saved_prog;
+    receiver = saved_receiver;
+    receiver_data = saved_receiver_data;
+    
+    // Clean up our temporary allocation
+    if (temp_program.var_names) {
+        myfree(temp_program.var_names, M_NAMES);
+    }
+    
+    return collector.result;
+}

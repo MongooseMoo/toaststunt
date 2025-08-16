@@ -45,5 +45,6 @@ extern int parse_error(const char *error);	/* "E_NONE" -> E_NONE */
 extern const char* parse_type(var_type);
 
 extern char *unparse_expr_to_string(Expr *expr, Symtab *symtab);
+extern char *unparse_stmt_to_string(Stmt *stmt, Symtab *symtab);
 
 #endif

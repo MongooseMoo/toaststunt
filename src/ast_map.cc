@@ -1278,72 +1278,12 @@ static void free_minimal_program(Program *prog) {
 
 // Expression unparsing now handled by unparse.cc integration
 
-// Helper function to unparse a single statement to string
-static char *unparse_single_stmt(Stmt *stmt, Symtab *symtab) {
-    if (!stmt) {
-        return nullptr;
-    }
-    
-    char *result = nullptr;
-    
-    switch (stmt->kind) {
-        case STMT_RETURN: {
-            if (stmt->s.expr) {
-                // return expr;
-                char *expr_str = unparse_expr_to_string(stmt->s.expr, symtab);
-                result = (char *)mymalloc(strlen(expr_str) + 9, M_STRING);
-                sprintf(result, "return %s;", expr_str);
-                myfree(expr_str, M_STRING);
-            } else {
-                // bare return;
-                result = (char *)mymalloc(8, M_STRING);
-                strcpy(result, "return;");
-            }
-            break;
-        }
-        
-        case STMT_EXPR: {
-            // Expression statement: expr;
-            char *expr_str = unparse_expr_to_string(stmt->s.expr, symtab);
-            result = (char *)mymalloc(strlen(expr_str) + 2, M_STRING);
-            sprintf(result, "%s;", expr_str);
-            myfree(expr_str, M_STRING);
-            break;
-        }
-        
-        default:
-            // Unimplemented statement type
-            result = (char *)mymalloc(64, M_STRING);
-            sprintf(result, "/* unimplemented stmt: %s */", stmt_type_names[stmt->kind]);
-            break;
-    }
-    
-    return result;
-}
+// Add a public function to unparse.cc for statement unparsing
+extern char *unparse_stmt_to_string(Stmt *stmt, Symtab *symtab);
 
-// Convert Stmt* to Var list - real implementation
-static Var unparse_stmt_to_var(Stmt *stmt, Symtab *symtab) {
-    if (!stmt) {
-        return new_list(0);  // Return empty list for null stmt
-    }
-    
-    // Handle statement sequences (linked list via next pointer)
-    Var lines = new_list(0);
-    int line_count = 0;
-    
-    for (Stmt *s = stmt; s; s = s->next) {
-        char *line = unparse_single_stmt(s, symtab);
-        if (line) {
-            line_count++;
-            lines = listinsert(lines, str_dup_to_var(line), line_count);
-            myfree(line, M_STRING);
-        }
-    }
-    
-    return lines;
-}
 
 /*********** AST Builtin Functions ***********/
+
 
 // Global variables to capture AST during parsing  
 static Var captured_ast;
@@ -1517,11 +1457,46 @@ static package bf_unparse_ast(Var arglist, Byte next, void *vdata, Objid progr) 
         return make_error_pack(E_INVARG);
     }
     
-    // Convert AST to code using existing unparse infrastructure
-    Var result = unparse_stmt_to_var(stmt, symtab);
+    // Use the new unparse_stmt_to_string function
+    char *unparsed_code = unparse_stmt_to_string(stmt, symtab);
     
-    end_code_allocation(1);  // Abort and clean up everything including symtab
-    return make_var_pack(result);
+    // Create result list by splitting multi-line string into separate lines
+    Var result_list = new_list(0);
+    if (unparsed_code && strlen(unparsed_code) > 0) {
+        // Split the string on newlines
+        char *line_start = unparsed_code;
+        char *line_end;
+        
+        while ((line_end = strchr(line_start, '\n')) != nullptr) {
+            // Create string for this line
+            int line_len = line_end - line_start;
+            char *line_str = (char *)mymalloc(line_len + 1, M_STRING);
+            strncpy(line_str, line_start, line_len);
+            line_str[line_len] = '\0';
+            
+            Var line_var = str_dup_to_var(line_str);
+            result_list = listappend(result_list, line_var);
+            
+            myfree(line_str, M_STRING);
+            line_start = line_end + 1;
+        }
+        
+        // Handle the last line (if no trailing newline)
+        if (*line_start != '\0') {
+            Var line_var = str_dup_to_var(line_start);
+            result_list = listappend(result_list, line_var);
+        }
+    }
+    
+    // Free the string
+    if (unparsed_code) {
+        myfree(unparsed_code, M_STRING);
+    }
+    
+    end_code_allocation(1);  // Clean up AST allocations
+    free_var(arglist);
+    
+    return make_var_pack(result_list);
 }
 
 static package bf_validate_ast(Var arglist, Byte next, void *vdata, Objid progr) {
