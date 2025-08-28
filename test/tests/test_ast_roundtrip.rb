@@ -217,7 +217,7 @@ class TestAstRoundTrip < Test::Unit::TestCase
 
   def test_for_range_loop
     run_test_as("wizard") do
-      test_round_trip("For-in range", "for i in ([1..3]) typeof(i); endfor")
+      test_round_trip("For-in range", "for i in [1..3] typeof(i); endfor")
     end
   end
 

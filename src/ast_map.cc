@@ -394,6 +394,19 @@ static Var expr_to_map_visitor(Expr *expr, Symtab *symtab) {
             }
             break;
             
+        case EXPR_RANGE:
+            // Range expression: base[from..to] or [from..to]
+            result = mapinsert(result, str_dup_to_var("from"), 
+                               expr_to_map_visitor(expr->e.range.from, symtab));
+            result = mapinsert(result, str_dup_to_var("to"), 
+                               expr_to_map_visitor(expr->e.range.to, symtab));
+            // Only include base if it exists (for indexed ranges like obj[1..3])
+            if (expr->e.range.base) {
+                result = mapinsert(result, str_dup_to_var("base"), 
+                                   expr_to_map_visitor(expr->e.range.base, symtab));
+            }
+            break;
+            
         // TODO: Implement remaining expression types
         default:
             // Mark as unimplemented for now
@@ -937,6 +950,39 @@ static Expr *map_to_expr_visitor(Var map, Symtab *symtab) {
             result->e.verb.obj = obj;
             result->e.verb.verb = verb;
             result->e.verb.args = args;
+            return result;
+        }
+        
+        case EXPR_RANGE: {
+            // Range expression: base[from..to] or [from..to]
+            Var from_field, to_field;
+            if (maplookup(map, str_dup_to_var("from"), &from_field, 0) == nullptr ||
+                maplookup(map, str_dup_to_var("to"), &to_field, 0) == nullptr) {
+                return nullptr;
+            }
+            
+            Expr *from = map_to_expr_visitor(from_field, symtab);
+            Expr *to = map_to_expr_visitor(to_field, symtab);
+            if (!from || !to) {
+                return nullptr;
+            }
+            
+            Expr *result = alloc_expr(EXPR_RANGE);
+            result->e.range.from = from;
+            result->e.range.to = to;
+            result->e.range.base = nullptr; // Default to no base
+            
+            // Base is optional - only present for indexed ranges like obj[1..3]
+            Var base_field;
+            if (maplookup(map, str_dup_to_var("base"), &base_field, 0) != nullptr) {
+                // Only try to convert base if the field exists and is valid
+                Expr *base = map_to_expr_visitor(base_field, symtab);
+                if (base) {  // Only set base if conversion succeeds
+                    result->e.range.base = base;
+                }
+                // If base conversion fails, we still continue with base=nullptr
+            }
+            
             return result;
         }
         
