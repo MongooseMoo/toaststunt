@@ -82,17 +82,18 @@ static const char *expr_type_names[SizeOf_Expr_Kind] = {
     "in",         // EXPR_IN       (24)
     "list",       // EXPR_LIST     (25)
     "cond",       // EXPR_COND     (26)
-    "map",        // EXPR_MAP      (27)
-    "bitor",      // EXPR_BITOR    (28)
-    "bitand",     // EXPR_BITAND   (29)
-    "bitxor",     // EXPR_BITXOR   (30)
-    "bitshl",     // EXPR_BITSHL   (31)
-    "bitshr",     // EXPR_BITSHR   (32)
-    "complement", // EXPR_COMPLEMENT (33)
-    "scatter",    // EXPR_SCATTER  (34)
-    "catch",      // EXPR_CATCH    (35)
-    "first",      // EXPR_FIRST    (36)
-    "last"        // EXPR_LAST     (37)
+    "catch",      // EXPR_CATCH    (27)
+    "length",     // EXPR_LENGTH   (28) - retired
+    "scatter",    // EXPR_SCATTER  (29)
+    "map",        // EXPR_MAP      (30)
+    "first",      // EXPR_FIRST    (31)
+    "last",       // EXPR_LAST     (32)
+    "bitor",      // EXPR_BITOR    (33)
+    "bitand",     // EXPR_BITAND   (34)
+    "bitxor",     // EXPR_BITXOR   (35)
+    "bitshl",     // EXPR_BITSHL   (36)
+    "bitshr",     // EXPR_BITSHR   (37)
+    "complement"  // EXPR_COMPLEMENT (38)
 };
 
 // Statement type strings (must match enum Stmt_Kind order)  
@@ -332,6 +333,7 @@ static Var expr_to_map_visitor(Expr *expr, Symtab *symtab) {
             break;
             
         // Binary operators (use same pattern)
+        case EXPR_INDEX:
         case EXPR_PLUS:
         case EXPR_MINUS:
         case EXPR_TIMES:
@@ -404,6 +406,24 @@ static Var expr_to_map_visitor(Expr *expr, Symtab *symtab) {
             if (expr->e.range.base) {
                 result = mapinsert(result, str_dup_to_var("base"), 
                                    expr_to_map_visitor(expr->e.range.base, symtab));
+            }
+            break;
+            
+        case EXPR_MAP:
+            // Map literal: ["key" -> value, "k2" -> v2, ...]
+            if (expr->e.map) {
+                Var elements = new_list(0);
+                int count = 0;
+                for (Map_List *entry = expr->e.map; entry; entry = entry->next) {
+                    count++;
+                    Var element = new_map();
+                    element = mapinsert(element, str_dup_to_var("key"), 
+                                        expr_to_map_visitor(entry->key, symtab));
+                    element = mapinsert(element, str_dup_to_var("value"), 
+                                        expr_to_map_visitor(entry->value, symtab));
+                    elements = listinsert(elements, element, count);
+                }
+                result = mapinsert(result, str_dup_to_var("elements"), elements);
             }
             break;
             
@@ -696,6 +716,7 @@ static Expr *map_to_expr_visitor(Var map, Symtab *symtab) {
         return nullptr; // Unknown expression type
     }
     
+    
     // Create expression based on kind
     switch (kind) {
         case EXPR_PROP: {
@@ -717,6 +738,7 @@ static Expr *map_to_expr_visitor(Var map, Symtab *symtab) {
         }
         
         case EXPR_ASGN:
+        case EXPR_INDEX:
         case EXPR_PLUS:
         case EXPR_MINUS:
         case EXPR_TIMES:
@@ -983,6 +1005,87 @@ static Expr *map_to_expr_visitor(Var map, Symtab *symtab) {
                 // If base conversion fails, we still continue with base=nullptr
             }
             
+            return result;
+        }
+        
+        case EXPR_MAP: {
+            // Map literal: ["key" -> value, "k2" -> v2, ...]
+            Var elements_field;
+            if (maplookup(map, str_dup_to_var("elements"), &elements_field, 0) == nullptr) {
+                // Empty map - this is correct behavior
+                Expr *result = alloc_expr(EXPR_MAP);
+                result->e.map = nullptr;
+                return result;
+            }
+            
+            if (elements_field.type != TYPE_LIST) {
+                return nullptr;
+            }
+            
+            // Convert elements to Map_List
+            Map_List *map_list = nullptr;
+            Map_List *last_entry = nullptr;
+            
+            for (int i = 1; i <= elements_field.v.list[0].v.num; i++) {
+                Var element = elements_field.v.list[i];
+                if (element.type != TYPE_MAP) {
+                    // Cleanup and return error
+                    while (map_list) {
+                        Map_List *next = map_list->next;
+                        if (map_list->key) dealloc_node(map_list->key);
+                        if (map_list->value) dealloc_node(map_list->value);
+                        myfree(map_list, M_AST);
+                        map_list = next;
+                    }
+                    return nullptr;
+                }
+                
+                // Extract key and value fields from element
+                Var key_field, value_field;
+                if (maplookup(element, str_dup_to_var("key"), &key_field, 0) == nullptr ||
+                    maplookup(element, str_dup_to_var("value"), &value_field, 0) == nullptr) {
+                    // Cleanup and return error
+                    while (map_list) {
+                        Map_List *next = map_list->next;
+                        if (map_list->key) dealloc_node(map_list->key);
+                        if (map_list->value) dealloc_node(map_list->value);
+                        myfree(map_list, M_AST);
+                        map_list = next;
+                    }
+                    return nullptr;
+                }
+                
+                Expr *key = map_to_expr_visitor(key_field, symtab);
+                Expr *value = map_to_expr_visitor(value_field, symtab);
+                if (!key || !value) {
+                    // Cleanup and return error
+                    if (key) dealloc_node(key);
+                    if (value) dealloc_node(value);
+                    while (map_list) {
+                        Map_List *next = map_list->next;
+                        if (map_list->key) dealloc_node(map_list->key);
+                        if (map_list->value) dealloc_node(map_list->value);
+                        myfree(map_list, M_AST);
+                        map_list = next;
+                    }
+                    return nullptr;
+                }
+                
+                Map_List *entry = alloc_map_list(key, value);
+                entry->next = nullptr;
+                
+                // Build list in correct order (first to last)
+                if (!map_list) {
+                    map_list = entry;
+                    last_entry = entry;
+                } else {
+                    last_entry->next = entry;
+                    last_entry = entry;
+                }
+            }
+            
+            Expr *result = alloc_expr(EXPR_MAP);
+            result->e.map = map_list;
             return result;
         }
         

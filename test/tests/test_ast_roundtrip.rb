@@ -299,6 +299,19 @@ class TestAstRoundTrip < Test::Unit::TestCase
     end
   end
 
+  def test_index_expression
+    run_test_as("wizard") do
+      test_round_trip("List indexing", "return {1, 2, 3}[2];")
+    end
+  end
+
+  def test_map_expression
+    run_test_as("wizard") do
+      test_round_trip("Empty map", "return [];")
+      test_round_trip("Single element map", "return [1 -> 42];")
+    end
+  end
+
   def test_property_assignment
     run_test_as("wizard") do
       test_round_trip("Property assignment", "player.location = here;")
