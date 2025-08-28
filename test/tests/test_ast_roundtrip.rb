@@ -12,6 +12,7 @@ class TestAstRoundTrip < Test::Unit::TestCase
       add_verb(o, [player, 'x', 'test_input'], ['this', 'none', 'this'])
       set_verb_code(o, 'test_input', [input_code])
       puts "✅ Input code is valid MOO syntax"
+      puts "   ⚠️  If E_INVARG appears below, the problem is in AST conversion, NOT syntax"
     rescue => e
       puts "❌ Input code is invalid MOO syntax: #{e.message}"
       puts "   Skipping round-trip test for invalid input"
@@ -317,6 +318,24 @@ class TestAstRoundTrip < Test::Unit::TestCase
       # Test ^ and $ in indexing contexts where they work
       test_round_trip("First in list indexing", "return args[^];")
       test_round_trip("Last in list indexing", "return args[$];")
+    end
+  end
+
+  def test_catch_expression
+    run_test_as("wizard") do
+      # Debug what AST gets generated for catch expression
+      puts "\n=== Debugging catch expression AST ==="
+      
+      # Test simple expression first to see if parse_ast works
+      simple_ast = command("; return parse_ast({\"return 42;\"});")
+      puts "Simple AST: #{simple_ast.inspect}"
+      
+      catch_ast = command("; return parse_ast({\"return `1 ! ANY => 0';\"});")
+      puts "Catch AST: #{catch_ast.inspect}"
+      
+      # Test catch expression: expr ! codes => except_expr (correct syntax with single quotes)
+      test_round_trip("Catch expression basic", "return `1 ! ANY => 0';")
+      test_round_trip("Catch expression with error code", "return `length({}) ! E_INVARG => -1';")
     end
   end
 

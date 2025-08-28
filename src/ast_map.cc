@@ -433,6 +433,18 @@ static Var expr_to_map_visitor(Expr *expr, Symtab *symtab) {
             // No additional fields needed beyond type
             break;
             
+        case EXPR_CATCH:
+            // Catch expression: try_expr ! (codes) => except_expr
+            result = mapinsert(result, str_dup_to_var("try"), 
+                               expr_to_map_visitor(expr->e._catch._try, symtab));
+            if (expr->e._catch.codes) {
+                result = mapinsert(result, str_dup_to_var("codes"), 
+                                   arg_list_to_list(expr->e._catch.codes, symtab));
+            }
+            result = mapinsert(result, str_dup_to_var("except"), 
+                               expr_to_map_visitor(expr->e._catch.except, symtab));
+            break;
+            
         // TODO: Implement remaining expression types
         default:
             // Mark as unimplemented for now
@@ -1099,6 +1111,36 @@ static Expr *map_to_expr_visitor(Var map, Symtab *symtab) {
         case EXPR_LAST:
             // Nullary operators: ^ and $ (no sub-expressions to convert)
             return alloc_expr(kind);
+            
+        case EXPR_CATCH: {
+            // Catch expression: try_expr ! (codes) => except_expr
+            Var try_field, codes_field, except_field;
+            
+            if (maplookup(map, str_dup_to_var("try"), &try_field, 0) == nullptr ||
+                maplookup(map, str_dup_to_var("except"), &except_field, 0) == nullptr) {
+                return nullptr;
+            }
+            
+            Expr *result = alloc_expr(EXPR_CATCH);
+            result->e._catch._try = map_to_expr_visitor(try_field, symtab);
+            if (!result->e._catch._try) {
+                return nullptr;
+            }
+            
+            result->e._catch.except = map_to_expr_visitor(except_field, symtab);
+            if (!result->e._catch.except) {
+                return nullptr;
+            }
+            
+            // Handle optional codes
+            if (maplookup(map, str_dup_to_var("codes"), &codes_field, 0) != nullptr) {
+                result->e._catch.codes = list_to_arg_list(codes_field, symtab);
+            } else {
+                result->e._catch.codes = nullptr;
+            }
+            
+            return result;
+        }
             
         // TODO: Add more expression types as needed
         default:
