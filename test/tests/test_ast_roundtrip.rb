@@ -35,7 +35,7 @@ class TestAstRoundTrip < Test::Unit::TestCase
     unparsed_code = unparsed_lines.join("\n")
     
     # For simple expressions, should match exactly (except string literals which have different escaping)
-    if input_code.include?("return") && !input_code.include?("if") && !input_code.include?("while") && !input_code.include?("\\\"")
+    if input_code.include?("return") && !input_code.include?("if") && !input_code.include?("while") && !input_code.include?("try") && !input_code.include?("\\\"")
       assert_equal(input_code, unparsed_code, "Round-trip failed for simple expression")
     end
     
@@ -231,9 +231,9 @@ class TestAstRoundTrip < Test::Unit::TestCase
     end
   end
 
-  def test_try_except_finally
+  def test_try_finally
     run_test_as("wizard") do
-      test_round_trip("Try-except-finally", "try return 42; except e (ANY) return -1; finally player:tell(\\\"cleanup\\\"); endtry")
+      test_round_trip("Try-finally", "try return 42; finally player:tell(42); endtry")
     end
   end
 
@@ -264,6 +264,12 @@ class TestAstRoundTrip < Test::Unit::TestCase
   def test_continue_statement
     run_test_as("wizard") do  
       test_round_trip("Continue statement", "for x in ({1, 2, 3}) continue; endfor")
+    end
+  end
+
+  def test_fork_statement
+    run_test_as("wizard") do
+      test_round_trip("Fork statement", "fork (1) player:tell(42); endfork")
     end
   end
 

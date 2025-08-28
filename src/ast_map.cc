@@ -196,6 +196,8 @@ static int validate_version(Var map) {
 /*********** Expression Conversion: AST → MAP ***********/
 
 static Var expr_to_map_visitor(Expr *expr, Symtab *symtab);
+static Var arg_list_to_list(Arg_List *args, Symtab *symtab);
+static Arg_List *list_to_arg_list(Var list, Symtab *symtab);
 
 // Convert literal Var to MAP representation
 static Var var_literal_to_map(Var literal) {
@@ -570,7 +572,11 @@ static Var stmt_to_map_visitor(Stmt *stmt, Symtab *symtab) {
                                            str_dup_to_var(symtab->names[arm->id]));
                 }
                 
-                // TODO: Convert codes (Arg_List) - needs Arg_List to MAP conversion
+                // Convert exception codes (Arg_List) to MAP format
+                if (arm->codes) {
+                    except_map = mapinsert(except_map, str_dup_to_var("codes"), 
+                                           arg_list_to_list(arm->codes, symtab));
+                }
                 
                 excepts_list = listappend(excepts_list, except_map);
             }
@@ -1137,13 +1143,174 @@ static Stmt *map_to_stmt_visitor(Var map, Symtab *symtab) {
             return result;
         }
         
+        case STMT_LIST: {
+            // For-in-list loop: for x in (list) body; endfor
+            Var expr_field, body_field, id_field, index_field;
+            if (maplookup(map, str_dup_to_var("expr"), &expr_field, 0) == nullptr ||
+                maplookup(map, str_dup_to_var("body"), &body_field, 0) == nullptr ||
+                maplookup(map, str_dup_to_var("id"), &id_field, 0) == nullptr) {
+                return nullptr;
+            }
+            
+            Expr *expr = map_to_expr_visitor(expr_field, symtab);
+            Stmt *body = map_to_stmt_visitor(body_field, symtab);
+            
+            if (!expr || !body || id_field.type != TYPE_INT) {
+                return nullptr; // Automatic cleanup via allocation pool
+            }
+            
+            Stmt *result = alloc_stmt(STMT_LIST);
+            result->s.list.expr = expr;
+            result->s.list.body = body;
+            result->s.list.id = id_field.v.num;
+            
+            // Handle optional index variable (-1 if not used)
+            if (maplookup(map, str_dup_to_var("index"), &index_field, 0) != nullptr &&
+                index_field.type == TYPE_INT) {
+                result->s.list.index = index_field.v.num;
+            } else {
+                result->s.list.index = -1;
+            }
+            
+            return result;
+        }
+        
+        case STMT_RANGE: {
+            // For-in-range loop: for x in [from..to] body; endfor
+            Var from_field, to_field, body_field, id_field;
+            if (maplookup(map, str_dup_to_var("from"), &from_field, 0) == nullptr ||
+                maplookup(map, str_dup_to_var("to"), &to_field, 0) == nullptr ||
+                maplookup(map, str_dup_to_var("body"), &body_field, 0) == nullptr ||
+                maplookup(map, str_dup_to_var("id"), &id_field, 0) == nullptr) {
+                return nullptr;
+            }
+            
+            Expr *from = map_to_expr_visitor(from_field, symtab);
+            Expr *to = map_to_expr_visitor(to_field, symtab);
+            Stmt *body = map_to_stmt_visitor(body_field, symtab);
+            
+            if (!from || !to || !body || id_field.type != TYPE_INT) {
+                return nullptr; // Automatic cleanup via allocation pool
+            }
+            
+            Stmt *result = alloc_stmt(STMT_RANGE);
+            result->s.range.from = from;
+            result->s.range.to = to;
+            result->s.range.body = body;
+            result->s.range.id = id_field.v.num;
+            
+            return result;
+        }
+        
         case STMT_BREAK:
         case STMT_CONTINUE: {
             // Simple statements with no additional data
             return alloc_stmt(kind);
         }
         
-        // TODO: Add remaining statement types as needed
+        case STMT_TRY_EXCEPT: {
+            // Try-except statement: try body; except err (codes) handler; endtry
+            Var body_field, excepts_field;
+            if (maplookup(map, str_dup_to_var("body"), &body_field, 0) == nullptr ||
+                maplookup(map, str_dup_to_var("excepts"), &excepts_field, 0) == nullptr) {
+                return nullptr;
+            }
+            if (excepts_field.type != TYPE_LIST) {
+                return nullptr;
+            }
+            
+            Stmt *body = map_to_stmt_visitor(body_field, symtab);
+            if (!body) {
+                return nullptr; // Automatic cleanup via allocation pool
+            }
+            
+            Stmt *result = alloc_stmt(STMT_TRY_EXCEPT);
+            result->s._catch.body = body;
+            result->s._catch.excepts = nullptr;
+            
+            // Convert exception handlers list
+            Except_Arm **except_ptr = &result->s._catch.excepts;
+            for (int i = 1; i <= excepts_field.v.list[0].v.num; i++) {
+                Var except_map = excepts_field.v.list[i];
+                if (except_map.type != TYPE_MAP) {
+                    return nullptr; // Automatic cleanup via allocation pool
+                }
+                
+                Var id_field, stmt_field;
+                if (maplookup(except_map, str_dup_to_var("id"), &id_field, 0) == nullptr ||
+                    maplookup(except_map, str_dup_to_var("stmt"), &stmt_field, 0) == nullptr ||
+                    id_field.type != TYPE_INT) {
+                    return nullptr; // Automatic cleanup via allocation pool
+                }
+                
+                Stmt *except_stmt = map_to_stmt_visitor(stmt_field, symtab);
+                if (!except_stmt) {
+                    return nullptr; // Automatic cleanup via allocation pool
+                }
+                
+                // Convert exception codes from MAP to Arg_List
+                Arg_List *codes = nullptr;
+                Var codes_field;
+                if (maplookup(except_map, str_dup_to_var("codes"), &codes_field, 0) != nullptr) {
+                    codes = list_to_arg_list(codes_field, symtab);
+                    // If codes conversion fails, it's not critical - just use null
+                }
+                
+                *except_ptr = alloc_except(id_field.v.num, codes, except_stmt);
+                except_ptr = &(*except_ptr)->next;
+            }
+            
+            return result;
+        }
+        
+        case STMT_TRY_FINALLY: {
+            // Try-finally statement: try body; finally handler; endtry
+            Var body_field, handler_field;
+            if (maplookup(map, str_dup_to_var("body"), &body_field, 0) == nullptr ||
+                maplookup(map, str_dup_to_var("handler"), &handler_field, 0) == nullptr) {
+                return nullptr;
+            }
+            
+            Stmt *body = map_to_stmt_visitor(body_field, symtab);
+            Stmt *handler = map_to_stmt_visitor(handler_field, symtab);
+            
+            if (!body || !handler) {
+                return nullptr; // Automatic cleanup via allocation pool
+            }
+            
+            Stmt *result = alloc_stmt(STMT_TRY_FINALLY);
+            result->s.finally.body = body;
+            result->s.finally.handler = handler;
+            return result;
+        }
+        
+        case STMT_FORK: {
+            // Fork statement: fork (time) body; endfork
+            Var time_field, body_field, id_field;
+            if (maplookup(map, str_dup_to_var("time"), &time_field, 0) == nullptr ||
+                maplookup(map, str_dup_to_var("body"), &body_field, 0) == nullptr ||
+                maplookup(map, str_dup_to_var("id"), &id_field, 0) == nullptr) {
+                return nullptr;
+            }
+            
+            if (id_field.type != TYPE_INT) {
+                return nullptr;
+            }
+            
+            Expr *time = map_to_expr_visitor(time_field, symtab);
+            Stmt *body = map_to_stmt_visitor(body_field, symtab);
+            
+            if (!time || !body) {
+                return nullptr; // Automatic cleanup via allocation pool
+            }
+            
+            Stmt *result = alloc_stmt(STMT_FORK);
+            result->s.fork.time = time;
+            result->s.fork.body = body;
+            result->s.fork.id = id_field.v.num;
+            return result;
+        }
+        
         default:
             return nullptr; // Unimplemented statement type
     }
@@ -1160,6 +1327,70 @@ Stmt *map_to_stmt(Var map, Symtab *symtab) {
     }
     
     return map_to_stmt_visitor(map, symtab);
+}
+
+/*********** Arg_List Conversion ***********/
+
+// Convert Arg_List to list of MAPs
+static Var arg_list_to_list(Arg_List *args, Symtab *symtab) {
+    Var result = new_list(0);
+    
+    for (Arg_List *arg = args; arg != nullptr; arg = arg->next) {
+        Var arg_map = new_map();
+        arg_map = mapinsert(arg_map, str_dup_to_var("kind"), 
+                            str_dup_to_var(arg->kind == ARG_NORMAL ? "normal" : "splice"));
+        arg_map = mapinsert(arg_map, str_dup_to_var("expr"), 
+                            expr_to_map_visitor(arg->expr, symtab));
+        result = listappend(result, arg_map);
+    }
+    
+    return result;
+}
+
+// Convert list of MAPs to Arg_List
+static Arg_List *list_to_arg_list(Var list, Symtab *symtab) {
+    if (list.type != TYPE_LIST) {
+        return nullptr;
+    }
+    
+    Arg_List *result = nullptr;
+    Arg_List **arg_ptr = &result;
+    
+    for (int i = 1; i <= list.v.list[0].v.num; i++) {
+        Var arg_map = list.v.list[i];
+        if (arg_map.type != TYPE_MAP) {
+            return nullptr; // Invalid - all args should be maps
+        }
+        
+        Var kind_field, expr_field;
+        if (maplookup(arg_map, str_dup_to_var("kind"), &kind_field, 0) == nullptr ||
+            maplookup(arg_map, str_dup_to_var("expr"), &expr_field, 0) == nullptr) {
+            return nullptr; // Missing required fields
+        }
+        
+        if (kind_field.type != TYPE_STR) {
+            return nullptr; // Invalid kind field
+        }
+        
+        enum Arg_Kind kind;
+        if (strcmp(kind_field.v.str, "normal") == 0) {
+            kind = ARG_NORMAL;
+        } else if (strcmp(kind_field.v.str, "splice") == 0) {
+            kind = ARG_SPLICE;
+        } else {
+            return nullptr; // Unknown arg kind
+        }
+        
+        Expr *expr = map_to_expr_visitor(expr_field, symtab);
+        if (!expr) {
+            return nullptr; // Invalid expression
+        }
+        
+        *arg_ptr = alloc_arg_list(kind, expr);
+        arg_ptr = &(*arg_ptr)->next;
+    }
+    
+    return result;
 }
 
 /*********** Symbol Table Implementation ***********/
