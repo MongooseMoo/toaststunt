@@ -199,6 +199,8 @@ static int validate_version(Var map) {
 static Var expr_to_map_visitor(Expr *expr, Symtab *symtab);
 static Var arg_list_to_list(Arg_List *args, Symtab *symtab);
 static Arg_List *list_to_arg_list(Var list, Symtab *symtab);
+static Var scatter_to_list(Scatter *scatter, Symtab *symtab);
+static Scatter *list_to_scatter(Var list, Symtab *symtab);
 
 // Convert literal Var to MAP representation
 static Var var_literal_to_map(Var literal) {
@@ -443,6 +445,14 @@ static Var expr_to_map_visitor(Expr *expr, Symtab *symtab) {
             }
             result = mapinsert(result, str_dup_to_var("except"), 
                                expr_to_map_visitor(expr->e._catch.except, symtab));
+            break;
+            
+        case EXPR_SCATTER:
+            // Scatter expression: {a, ?b=default, @rest}
+            if (expr->e.scatter) {
+                result = mapinsert(result, str_dup_to_var("elements"), 
+                                   scatter_to_list(expr->e.scatter, symtab));
+            }
             break;
             
         // TODO: Implement remaining expression types
@@ -1141,6 +1151,26 @@ static Expr *map_to_expr_visitor(Var map, Symtab *symtab) {
             
             return result;
         }
+        
+        case EXPR_SCATTER: {
+            // Scatter expression: {a, ?b=default, @rest}
+            Var elements_field;
+            if (maplookup(map, str_dup_to_var("elements"), &elements_field, 0) == nullptr) {
+                // Empty scatter - this shouldn't happen but handle gracefully
+                Expr *result = alloc_expr(EXPR_SCATTER);
+                result->e.scatter = nullptr;
+                return result;
+            }
+            
+            Scatter *scatter = list_to_scatter(elements_field, symtab);
+            if (!scatter) {
+                return nullptr;
+            }
+            
+            Expr *result = alloc_expr(EXPR_SCATTER);
+            result->e.scatter = scatter;
+            return result;
+        }
             
         // TODO: Add more expression types as needed
         default:
@@ -1551,6 +1581,91 @@ static Arg_List *list_to_arg_list(Var list, Symtab *symtab) {
         
         *arg_ptr = alloc_arg_list(kind, expr);
         arg_ptr = &(*arg_ptr)->next;
+    }
+    
+    return result;
+}
+
+// Scatter helper functions
+static Var scatter_to_list(Scatter *scatter, Symtab *symtab) {
+    Var result = new_list(0);
+    int count = 0;
+    
+    for (Scatter *sc = scatter; sc; sc = sc->next) {
+        count++;
+        Var element = new_map();
+        
+        // Add kind field
+        const char *kind_str;
+        switch (sc->kind) {
+            case SCAT_REQUIRED: kind_str = "required"; break;
+            case SCAT_OPTIONAL: kind_str = "optional"; break;
+            case SCAT_REST: kind_str = "rest"; break;
+            default: kind_str = "unknown"; break;
+        }
+        element = mapinsert(element, str_dup_to_var("kind"), str_dup_to_var(kind_str));
+        
+        // Add id field (variable name)
+        element = mapinsert(element, str_dup_to_var("id"), Var::new_int(sc->id));
+        
+        // Add expr field (default value for optional)
+        if (sc->expr) {
+            element = mapinsert(element, str_dup_to_var("expr"), 
+                                expr_to_map_visitor(sc->expr, symtab));
+        }
+        
+        result = listinsert(result, element, count);
+    }
+    
+    return result;
+}
+
+static Scatter *list_to_scatter(Var list, Symtab *symtab) {
+    if (list.type != TYPE_LIST) {
+        return nullptr;
+    }
+    
+    Scatter *result = nullptr;
+    Scatter **last_ptr = &result;
+    
+    for (int i = 1; i <= list.v.list[0].v.num; i++) {
+        Var element = list.v.list[i];
+        if (element.type != TYPE_MAP) {
+            return nullptr;
+        }
+        
+        Var kind_field, id_field, expr_field;
+        if (maplookup(element, str_dup_to_var("kind"), &kind_field, 0) == nullptr ||
+            maplookup(element, str_dup_to_var("id"), &id_field, 0) == nullptr) {
+            return nullptr;
+        }
+        
+        if (kind_field.type != TYPE_STR || id_field.type != TYPE_INT) {
+            return nullptr;
+        }
+        
+        enum Scatter_Kind kind;
+        if (strcmp(kind_field.v.str, "required") == 0) {
+            kind = SCAT_REQUIRED;
+        } else if (strcmp(kind_field.v.str, "optional") == 0) {
+            kind = SCAT_OPTIONAL;
+        } else if (strcmp(kind_field.v.str, "rest") == 0) {
+            kind = SCAT_REST;
+        } else {
+            return nullptr;
+        }
+        
+        Expr *expr = nullptr;
+        if (maplookup(element, str_dup_to_var("expr"), &expr_field, 0) != nullptr) {
+            expr = map_to_expr_visitor(expr_field, symtab);
+            if (!expr && kind == SCAT_OPTIONAL) {
+                return nullptr; // Optional scatter with invalid default expr
+            }
+        }
+        
+        Scatter *sc = alloc_scatter(kind, id_field.v.num, expr);
+        *last_ptr = sc;
+        last_ptr = &sc->next;
     }
     
     return result;

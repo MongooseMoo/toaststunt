@@ -351,4 +351,15 @@ class TestAstRoundTrip < Test::Unit::TestCase
     end
   end
 
+  def test_scatter_assignment
+    run_test_as("wizard") do
+      # Test scatter assignment: {a, b, c} = list
+      test_round_trip("Basic scatter assignment", "{a, b, c} = {1, 2, 3};")
+      # Test scatter with optional: {a, ?b} = list  
+      test_round_trip("Optional scatter assignment", "{a, ?b} = {1, 2};")
+      # Test scatter with rest: {a, @rest} = list
+      test_round_trip("Rest scatter assignment", "{a, @rest} = {1, 2, 3};")
+    end
+  end
+
 end
