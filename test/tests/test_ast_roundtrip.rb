@@ -312,6 +312,14 @@ class TestAstRoundTrip < Test::Unit::TestCase
     end
   end
 
+  def test_first_last_operators
+    run_test_as("wizard") do
+      # Test ^ and $ in indexing contexts where they work
+      test_round_trip("First in list indexing", "return args[^];")
+      test_round_trip("Last in list indexing", "return args[$];")
+    end
+  end
+
   def test_property_assignment
     run_test_as("wizard") do
       test_round_trip("Property assignment", "player.location = here;")

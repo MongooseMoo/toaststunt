@@ -427,6 +427,12 @@ static Var expr_to_map_visitor(Expr *expr, Symtab *symtab) {
             }
             break;
             
+        case EXPR_FIRST:
+        case EXPR_LAST:
+            // Nullary operators: ^ and $ (no sub-expressions)
+            // No additional fields needed beyond type
+            break;
+            
         // TODO: Implement remaining expression types
         default:
             // Mark as unimplemented for now
@@ -1089,6 +1095,11 @@ static Expr *map_to_expr_visitor(Var map, Symtab *symtab) {
             return result;
         }
         
+        case EXPR_FIRST:
+        case EXPR_LAST:
+            // Nullary operators: ^ and $ (no sub-expressions to convert)
+            return alloc_expr(kind);
+            
         // TODO: Add more expression types as needed
         default:
             return nullptr; // Unimplemented expression type
