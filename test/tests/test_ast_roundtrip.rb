@@ -22,13 +22,15 @@ class TestAstRoundTrip < Test::Unit::TestCase
     end
     
     # Test the round-trip using simplify() like other ToastStunt tests
-    unparsed_lines = simplify(command(%Q|; ast = parse_ast({"#{input_code}"}); return unparse_ast(ast);|))
+    unparsed_result = simplify(command(%Q|; ast = parse_ast({"#{input_code}"}); return unparse_ast(ast);|))
     
     puts "Input:  #{input_code.inspect}"
-    puts "Unparsed lines: #{unparsed_lines.inspect}"
+    puts "Unparsed result: #{unparsed_result.inspect}"
     
-    # Result should be a list of unparsed code lines
-    assert(unparsed_lines.is_a?(Array), "Expected array result, got: #{unparsed_lines.inspect}")
+    # Handle both string (single-line) and array (multi-line) results
+    unparsed_lines = unparsed_result.is_a?(Array) ? unparsed_result : [unparsed_result]
+    
+    # Result should be non-empty
     assert(unparsed_lines.length > 0, "Expected non-empty result")
     
     # Join lines for comparison
@@ -270,6 +272,12 @@ class TestAstRoundTrip < Test::Unit::TestCase
   def test_fork_statement
     run_test_as("wizard") do
       test_round_trip("Fork statement", "fork (1) player:tell(42); endfork")
+    end
+  end
+
+  def test_function_call_with_args
+    run_test_as("wizard") do
+      test_round_trip("Function call with args", "return length({1, 2, 3});")
     end
   end
 

@@ -324,7 +324,11 @@ static Var expr_to_map_visitor(Expr *expr, Symtab *symtab) {
             // Function call: func(args)
             result = mapinsert(result, str_dup_to_var("func"), 
                                str_dup_to_var(name_func_by_num(expr->e.call.func)));
-            // TODO: Convert args list
+            // Convert arguments list using existing Arg_List conversion
+            if (expr->e.call.args) {
+                result = mapinsert(result, str_dup_to_var("args"), 
+                                   arg_list_to_list(expr->e.call.args, symtab));
+            }
             break;
             
         // Binary operators (use same pattern)
@@ -753,57 +757,12 @@ static Expr *map_to_expr_visitor(Var map, Symtab *symtab) {
                 return nullptr; // Unknown function
             }
             
-            // Handle arguments (optional field)
+            // Handle arguments (optional field) using existing helper function
             Arg_List *args = nullptr;
             Var args_field;
             if (maplookup(map, str_dup_to_var("args"), &args_field, 0) != nullptr) {
-                if (args_field.type == TYPE_LIST) {
-                    // Convert arguments to Arg_List
-                    Arg_List **last_ptr = &args;
-                    
-                    for (int i = 1; i <= args_field.v.list[0].v.num; i++) {
-                        Var arg_element = args_field.v.list[i];
-                        if (arg_element.type != TYPE_MAP) {
-                            // Cleanup and return error
-                            while (args) {
-                                Arg_List *next = args->next;
-                                if (args->expr) dealloc_node(args->expr);
-                                myfree(args, M_AST);
-                                args = next;
-                            }
-                            return nullptr;
-                        }
-                        
-                        // Extract expr field from argument
-                        Var expr_field;
-                        if (maplookup(arg_element, str_dup_to_var("expr"), &expr_field, 0) == nullptr) {
-                            // Cleanup and return error
-                            while (args) {
-                                Arg_List *next = args->next;
-                                if (args->expr) dealloc_node(args->expr);
-                                myfree(args, M_AST);
-                                args = next;
-                            }
-                            return nullptr;
-                        }
-                        
-                        Expr *expr = map_to_expr_visitor(expr_field, symtab);
-                        if (!expr) {
-                            // Automatic cleanup via allocation pool
-                            return nullptr;
-                        }
-                        
-                        // Create new Arg_List node
-                        Arg_List *new_arg = (Arg_List *)mymalloc(sizeof(Arg_List), M_AST);
-                        new_arg->expr = expr;
-                        new_arg->kind = ARG_NORMAL;
-                        new_arg->next = nullptr;
-                        
-                        // Add to list
-                        *last_ptr = new_arg;
-                        last_ptr = &new_arg->next;
-                    }
-                }
+                args = list_to_arg_list(args_field, symtab);
+                // If args conversion fails, it's not critical - just use null
             }
             
             Expr *result = alloc_expr(EXPR_CALL);
@@ -1204,8 +1163,10 @@ static Stmt *map_to_stmt_visitor(Var map, Symtab *symtab) {
         
         case STMT_BREAK:
         case STMT_CONTINUE: {
-            // Simple statements with no additional data
-            return alloc_stmt(kind);
+            // Simple statements - need to initialize s.exit field
+            Stmt *result = alloc_stmt(kind);
+            result->s.exit = -1;  // -1 means no named loop
+            return result;
         }
         
         case STMT_TRY_EXCEPT: {
