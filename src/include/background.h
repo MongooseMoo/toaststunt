@@ -24,8 +24,8 @@ typedef struct background_waiter {
     bool active;                        // @kill will set active to false and the callback should handle it accordingly.
 } background_waiter;
 
-extern pthread_mutex_t shutdown_mutex;
-extern pthread_cond_t shutdown_condition;
+extern std::mutex shutdown_mutex;
+extern std::condition_variable shutdown_condition;
 extern uint16_t shutdown_complete;
 
 // User-visible functions

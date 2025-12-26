@@ -20,6 +20,12 @@
  *****************************************************************************/
 
 #include <assert.h>
+#ifdef _WIN32
+#include <malloc.h>
+#define alloca _alloca
+#else
+#include <alloca.h>
+#endif
 
 #include "collection.h"
 #include "config.h"
@@ -157,7 +163,7 @@ insert_prop_recursively(Objid root, int prop_pos, Pval pv)
 
     Var descendant, descendants = db_descendants(Var::new_obj(root), false);
     int i, c, offset = 0;
-    int offsets[listlength(descendants)];
+    int *offsets = (int *)alloca(listlength(descendants) * sizeof(int));
 
     FOR_EACH(descendant, descendants, i, c) {
         offset = properties_offset(Var::new_obj(root), descendant);
@@ -310,7 +316,7 @@ remove_prop_recursively(Objid root, int prop_pos)
 
     Var descendant, descendants = db_descendants(Var::new_obj(root), false);
     int i, c, offset = 0;
-    int offsets[listlength(descendants)];
+    int *offsets = (int *)alloca(listlength(descendants) * sizeof(int));
 
     FOR_EACH(descendant, descendants, i, c) {
         offset = properties_offset(Var::new_obj(root), descendant);

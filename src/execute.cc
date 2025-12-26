@@ -60,7 +60,9 @@ static Num root_activ_vector;   /* root_activ_vector == MAIN_VECTOR
 
 /* these globals are not part of the vm because they get re-initialized after a suspend */
 static int ticks_remaining;
-int task_timed_out;
+extern "C" {
+    int task_timed_out = 0;
+}
 static int interpreter_is_running = 0;
 static Timer_ID task_alarm_id;
 

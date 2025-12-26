@@ -17,6 +17,7 @@
 
 #include <stdarg.h>
 
+#include "platform.h"
 #include "bf_register.h"
 #include "config.h"
 #include "db_io.h"

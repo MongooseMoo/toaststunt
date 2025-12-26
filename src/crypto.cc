@@ -30,7 +30,11 @@
 #include <assert.h>
 #include <errno.h>
 #include <stdlib.h>
+#ifdef _WIN32
+#include "platform.h"
+#else
 #include <unistd.h>
+#endif
 
 #include "functions.h"
 #include "crypto.h"
@@ -359,8 +363,14 @@ bf_crypt(Var arglist, Byte next, void *vdata, Objid progr)
         r.v.str = str_dup(ret);
     }
     else {
+#ifdef _WIN32
+        /* Windows doesn't have Unix crypt() - only BCRYPT is available */
+        free_var(arglist);
+        return make_raise_pack(E_INVARG, "Only bcrypt ($2a$/$2b$) salts are supported on Windows", zero);
+#else
         r.type = TYPE_STR;
         r.v.str = str_dup(crypt(arglist.v.list[1].v.str, salt));
+#endif
     }
 
     free_var(arglist);
@@ -694,12 +704,16 @@ bf_value_hmac(Var arglist, Byte next, void *vdata, Objid progr)
 void
 register_crypto(void)
 {
+#ifndef _WIN32
+    /* Unix crypt() may support MD5, SHA256, SHA512 depending on system */
     if (!strncmp("$1$", crypt("password", "$1$"), 3))
         algorithms = HAS_MD5;
     if (!strncmp("$5$", crypt("password", "$5$"), 3))
         algorithms = HAS_SHA256;
     if (!strncmp("$6$", crypt("password", "$6$"), 3))
         algorithms = HAS_SHA512;
+#endif
+    /* BCRYPT is always available via bundled crypt_blowfish */
     algorithms = HAS_BCRYPT;
 
     register_function("salt", 2, 2, bf_salt, TYPE_STR, TYPE_STR);

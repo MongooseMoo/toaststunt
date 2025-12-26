@@ -116,7 +116,13 @@ extern enum outcome do_server_program_task(Var _this, const char *verb,
 					   int do_db_tracebacks);
 extern enum outcome resume_from_previous_vm(vm the_vm, Var value);
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 extern int task_timed_out;
+#ifdef __cplusplus
+}
+#endif
 extern void abort_running_task(void);
 extern void print_error_backtrace(const char *, void (*)(const char *));
 extern Var caller(void);

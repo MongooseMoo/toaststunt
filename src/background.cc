@@ -1,6 +1,12 @@
 #include "background.h"
 #include "bf_register.h"
+#ifdef _WIN32
+#include "platform.h"
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <unistd.h>                     // sleep()
+#endif
 #include "storage.h"                    // myfree, mymalloc
 #include "tasks.h"                      // TEA
 #include "utils.h"                      // var_dup
@@ -10,6 +16,75 @@
 #include "log.h"                        // errlog
 #include "map.h"
 #include <unordered_map>
+
+#ifdef _WIN32
+/*
+ * Windows doesn't have socketpair(), so we create a self-connected
+ * socket pair using localhost. This allows us to use select() on
+ * the socket pair, which is needed because Windows select() doesn't
+ * work with pipes.
+ */
+static int win32_socketpair(int domain, int type, int protocol, SOCKET sv[2])
+{
+    (void)domain;  /* always use AF_INET */
+    (void)protocol; /* always use 0 */
+
+    SOCKET listener = INVALID_SOCKET;
+    SOCKET client = INVALID_SOCKET;
+    SOCKET server = INVALID_SOCKET;
+    struct sockaddr_in addr;
+    int addrlen = sizeof(addr);
+
+    sv[0] = sv[1] = INVALID_SOCKET;
+
+    /* Create listening socket */
+    listener = socket(AF_INET, type, 0);
+    if (listener == INVALID_SOCKET)
+        goto fail;
+
+    /* Bind to loopback on ephemeral port */
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+
+    if (bind(listener, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR)
+        goto fail;
+
+    if (listen(listener, 1) == SOCKET_ERROR)
+        goto fail;
+
+    /* Get the port we bound to */
+    if (getsockname(listener, (struct sockaddr*)&addr, &addrlen) == SOCKET_ERROR)
+        goto fail;
+
+    /* Create client socket and connect */
+    client = socket(AF_INET, type, 0);
+    if (client == INVALID_SOCKET)
+        goto fail;
+
+    if (connect(client, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR)
+        goto fail;
+
+    /* Accept the connection */
+    server = accept(listener, NULL, NULL);
+    if (server == INVALID_SOCKET)
+        goto fail;
+
+    closesocket(listener);
+
+    sv[0] = client;  /* read end (also write) */
+    sv[1] = server;  /* write end (also read) */
+
+    return 0;
+
+fail:
+    if (listener != INVALID_SOCKET) closesocket(listener);
+    if (client != INVALID_SOCKET) closesocket(client);
+    if (server != INVALID_SOCKET) closesocket(server);
+    return -1;
+}
+#endif
 
 /*
   A general-purpose extension for doing work in separate threads. The entrypoint (background_thread)
@@ -32,8 +107,8 @@ static threadpool background_pool;
 static std::unordered_map <uint16_t, background_waiter*> background_process_table;
 static uint16_t next_background_handle = 1;
 
-pthread_mutex_t shutdown_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t shutdown_condition = PTHREAD_COND_INITIALIZER;
+std::mutex shutdown_mutex;
+std::condition_variable shutdown_condition;
 uint16_t shutdown_complete = false;
 
 /* Make sure creating a new thread won't exceed MAX_BACKGROUND_THREADS or $server_options.max_background_threads */
@@ -69,10 +144,19 @@ static void deallocate_background_waiter(background_waiter *waiter)
         waiter->cleanup(waiter->extra_data);
     if (waiter->fd[0] >= 0) {
         network_unregister_fd(waiter->fd[0]);
+#ifdef _WIN32
+        closesocket((SOCKET)waiter->fd[0]);
+#else
         close(waiter->fd[0]);
+#endif
     }
-    if (waiter->fd[1] >= 0)
+    if (waiter->fd[1] >= 0) {
+#ifdef _WIN32
+        closesocket((SOCKET)waiter->fd[1]);
+#else
         close(waiter->fd[1]);
+#endif
+    }
     free_var(waiter->return_value);
     free_var(waiter->data);
     myfree(waiter, M_STRUCT);
@@ -142,8 +226,12 @@ static void run_callback(void *bw)
     w->callback(w->data, &w->return_value, w->extra_data);
 
     if (!is_shutdown_triggered()) {
-        // Write to our network pipe to resume the MOO loop
+        // Write to our network pipe/socket to resume the MOO loop
+#ifdef _WIN32
+        send((SOCKET)w->fd[1], "1", 2, 0);
+#else
         write(w->fd[1], "1", 2);
+#endif
     } else if (w->active) {
         /* The server is shutting down. Sneak this into the task queue before it goes...
          * Note: We don't want to deallocate the background waiter at this point because
@@ -151,10 +239,11 @@ static void run_callback(void *bw)
         task_queue_mutex.lock();
         resume_task(w->the_vm, var_ref(w->return_value));
         task_queue_mutex.unlock();
-        pthread_mutex_lock(&shutdown_mutex);
-        shutdown_complete++;
-        pthread_cond_signal(&shutdown_condition);
-        pthread_mutex_unlock(&shutdown_mutex);
+        {
+            std::lock_guard<std::mutex> lock(shutdown_mutex);
+            shutdown_complete++;
+        }
+        shutdown_condition.notify_one();
     }
 }
 
@@ -165,7 +254,11 @@ static void network_callback(int fd, void *data)
     background_waiter *w = (background_waiter*)data;
 
     char buffer[2];
+#ifdef _WIN32
+    recv((SOCKET)w->fd[0], buffer, 2, 0);
+#else
     read(w->fd[0], buffer, 2);
+#endif
 
     /* Resume the MOO task if it hasn't already been killed. */
     if (w->active)
@@ -232,12 +325,25 @@ background_thread(void (*callback)(Var, Var*, void*), Var* data, void *extra_dat
         w->cleanup = cleanup;
         w->data = *data;
         w->extra_data = extra_data;
+#ifdef _WIN32
+        /* Windows: Use socket pair instead of pipe for select() compatibility */
+        SOCKET sv[2];
+        if (win32_socketpair(AF_INET, SOCK_STREAM, 0, sv) == -1)
+        {
+            errlog("Failed to create socket pair for background thread\n");
+            deallocate_background_waiter(w);
+            return make_error_pack(E_QUOTA);
+        }
+        w->fd[0] = (int)sv[0];
+        w->fd[1] = (int)sv[1];
+#else
         if (pipe(w->fd) == -1)
         {
             log_perror("Failed to create pipe for background thread");
             deallocate_background_waiter(w);
             return make_error_pack(E_QUOTA);
         }
+#endif
 
         return make_suspend_pack(background_suspender, (void*)w);
     }
@@ -252,10 +358,10 @@ void background_shutdown()
         thpool_destroy(background_pool);
     }
 
-    pthread_mutex_lock(&shutdown_mutex);
-    while (shutdown_complete < active)
-        pthread_cond_wait(&shutdown_condition, &shutdown_mutex);
-    pthread_mutex_unlock(&shutdown_mutex);
+    {
+        std::unique_lock<std::mutex> lock(shutdown_mutex);
+        shutdown_condition.wait(lock, [&active]{ return shutdown_complete >= active; });
+    }
 }
 
 static package

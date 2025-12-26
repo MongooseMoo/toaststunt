@@ -26,7 +26,15 @@
 #include "structures.h"
 #include "streams.h"
 #include "functions.h"
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+/* Windows uses ADDRESS_FAMILY but we need sa_family_t for compatibility */
+typedef ADDRESS_FAMILY sa_family_t;
+#else
 #include <netdb.h>      // sa_family_t
+#endif
 
 /* These get set by command-line options in server.cc */
 extern int outbound_network_enabled;

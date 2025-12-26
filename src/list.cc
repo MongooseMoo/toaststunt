@@ -23,6 +23,9 @@
 
 #include <ctype.h>
 #include <string.h>
+#ifdef _WIN32
+#include "platform.h"
+#endif
 #include "my-math.h"
 
 #include "bf_register.h"

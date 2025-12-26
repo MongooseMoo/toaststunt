@@ -10,6 +10,10 @@
 
 #if defined(__APPLE__)
 #include <AvailabilityMacros.h>
+#elif defined(_WIN32)
+/* Windows: No POSIX signals, disable pause mechanism */
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #else
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -17,9 +21,10 @@
 #ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 500
 #endif
-#endif
 #include <unistd.h>
 #include <signal.h>
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
@@ -246,7 +251,11 @@ void thpool_destroy(thpool_* thpool_p){
 	/* Poll remaining threads */
 	while (thpool_p->num_threads_alive){
 		bsem_post_all(thpool_p->jobqueue.has_jobs);
+#ifdef _WIN32
+		Sleep(1000);  /* Windows Sleep takes milliseconds */
+#else
 		sleep(1);
+#endif
 	}
 
 	/* Job queue cleanup */
@@ -263,10 +272,16 @@ void thpool_destroy(thpool_* thpool_p){
 
 /* Pause all threads in threadpool */
 void thpool_pause(thpool_* thpool_p) {
+#ifdef _WIN32
+	/* Windows: Signal-based pause not supported, just set the flag */
+	threads_on_hold = 1;
+	(void)thpool_p;
+#else
 	int n;
 	for (n=0; n < thpool_p->num_threads_alive; n++){
 		pthread_kill(thpool_p->threads[n]->pthread, SIGUSR1);
 	}
+#endif
 }
 
 
@@ -320,7 +335,11 @@ static void thread_hold(int sig_id) {
     (void)sig_id;
 	threads_on_hold = 1;
 	while (threads_on_hold){
+#ifdef _WIN32
+		Sleep(1000);  /* Windows Sleep takes milliseconds */
+#else
 		sleep(1);
+#endif
 	}
 }
 
@@ -353,7 +372,8 @@ static void* thread_do(struct thread* thread_p){
 	/* Assure all threads have been created before starting serving */
 	thpool_* thpool_p = thread_p->thpool_p;
 
-	/* Register signal handler */
+#ifndef _WIN32
+	/* Register signal handler (Unix only) */
 	struct sigaction act;
 	sigemptyset(&act.sa_mask);
 	act.sa_flags = SA_ONSTACK;
@@ -361,6 +381,7 @@ static void* thread_do(struct thread* thread_p){
 	if (sigaction(SIGUSR1, &act, NULL) == -1) {
 		err("thread_do(): cannot handle SIGUSR1");
 	}
+#endif
 
 	/* Mark thread as alive (initialized) */
 	pthread_mutex_lock(&thpool_p->thcount_lock);

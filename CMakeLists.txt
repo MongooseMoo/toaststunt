@@ -1,9 +1,21 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.10)
 set(VERSION_MAJOR 2)
 set(VERSION_MINOR 7)
 set(VERSION_RELEASE 3)
 set(VERSION_EXT "_2")
 project(ToastStunt VERSION ${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_RELEASE} LANGUAGES CXX C)
+
+# Windows platform detection
+if(WIN32)
+    set(IS_WINDOWS TRUE)
+    message(STATUS "Building for Windows")
+    # Force unforked checkpoints on Windows (no fork() available)
+    set(FORCE_UNFORKED_CHECKPOINTS TRUE)
+    add_definitions(-DUNFORKED_CHECKPOINTS)
+    add_definitions(-D_CRT_SECURE_NO_WARNINGS)
+    add_definitions(-DWIN32_LEAN_AND_MEAN)
+    add_definitions(-DNOMINMAX)
+endif()
 
 # Compile Options
 option(ONLY_32_BITS "Use 32-bit integers instead of 64-bit." OFF)
@@ -21,14 +33,21 @@ find_package(BISON REQUIRED)
 find_package(Perl REQUIRED)
 find_package(gperf REQUIRED)
 
-# (is there a better way to detect Apple Silicon?)
-EXECUTE_PROCESS( COMMAND uname -m COMMAND tr -d '\n' OUTPUT_VARIABLE ARCHITECTURE )
+# Architecture detection (cross-platform)
+if(NOT WIN32)
+    # Unix: use uname for architecture detection
+    EXECUTE_PROCESS( COMMAND uname -m COMMAND tr -d '\n' OUTPUT_VARIABLE ARCHITECTURE )
+else()
+    # Windows: use CMake's processor detection
+    set(ARCHITECTURE ${CMAKE_SYSTEM_PROCESSOR})
+endif()
+
 if(APPLE AND ${ARCHITECTURE} STREQUAL "arm64")
     set(APPLE_SILICON_FOUND 1)
 endif()
 
-# Check for a virtualized container
-if(EXISTS "/proc/1/cgroup")
+# Check for a virtualized container (Unix only)
+if(NOT WIN32 AND EXISTS "/proc/1/cgroup")
     file(READ "/proc/1/cgroup" CGROUPS)
     string(REGEX MATCH ".*(docker|lxc).*" IN_A_CONTAINER ${CGROUPS})
 else()
@@ -53,35 +72,54 @@ else()
 endif()
 
 # Compiler Flags
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 99)
 
-# These flags are shared by the RELEASE and WARN build types.
-set(SHARED_COMPILE_FLAGS "-O3")
-if(NOT APPLE_SILICON_FOUND AND NOT IN_A_CONTAINER)
-    set(SHARED_COMPILE_FLAGS "${SHARED_COMPILE_FLAGS} -march=native")
-elseif(APPLE_SILICON_FOUND)
-    set(SHARED_COMPILE_FLAGS "${SHARED_COMPILE_FLAGS} -mcpu=apple-m1")
+if(MSVC)
+    # MSVC compiler flags
+    # /Zc:preprocessor enables standards-conformant preprocessor (required for complex macros)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /Zc:preprocessor")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zc:preprocessor")
+    set(CMAKE_C_FLAGS_RELEASE   "${CMAKE_C_FLAGS_RELEASE} /O2 /W0")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /W0")
+    set(CMAKE_C_FLAGS_DEBUG     "${CMAKE_C_FLAGS_DEBUG} /Od /Zi")
+    set(CMAKE_CXX_FLAGS_DEBUG   "${CMAKE_CXX_FLAGS_DEBUG} /Od /Zi")
+    # Warn build type for MSVC
+    set(CMAKE_C_FLAGS_WARN      "/O2 /W3")
+    set(CMAKE_CXX_FLAGS_WARN    "/O2 /W3")
+else()
+    # GCC/Clang compiler flags
+    # These flags are shared by the RELEASE and WARN build types.
+    set(SHARED_COMPILE_FLAGS "-O3")
+    if(NOT APPLE_SILICON_FOUND AND NOT IN_A_CONTAINER)
+        set(SHARED_COMPILE_FLAGS "${SHARED_COMPILE_FLAGS} -march=native")
+    elseif(APPLE_SILICON_FOUND)
+        set(SHARED_COMPILE_FLAGS "${SHARED_COMPILE_FLAGS} -mcpu=apple-m1")
+    endif()
+
+    # The default for non-developers: Optimization enabled and all warnings silenced.
+    set(CMAKE_C_FLAGS_RELEASE   "${CMAKE_C_FLAGS_RELEASE} ${SHARED_COMPILE_FLAGS} -w")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} ${SHARED_COMPILE_FLAGS} -w")
+
+    # The normal LambdaMOO way: Optimizations and warnings enabled
+    set(CMAKE_C_FLAGS_WARN   "${SHARED_COMPILE_FLAGS} -Wall -Wno-unused-parameter -Wno-sign-compare -Wno-switch")
+    set(CMAKE_CXX_FLAGS_WARN "${CMAKE_C_FLAGS_WARN}")
+
+    # Check for memory leaks: Minimal optimizations, debug enabled, and sanitize address
+    set(CMAKE_C_FLAGS_LEAKCHECK  "-O1 -g -fsanitize=address -fno-omit-frame-pointer -fno-optimize-sibling-calls")
+    set(CMAKE_CXX_FLAGS_LEAKCHECK "${CMAKE_C_FLAGS_LEAKCHECK}")
+    if(CMAKE_BUILD_TYPE MATCHES "LeakCheck")
+        set(EXTRA_LINKER_FLAGS "-fsanitize=address")
+    endif()
 endif()
 
-# The default for non-developers: Optimization enabled and all warnings silenced.
-set(CMAKE_C_FLAGS_RELEASE   "${CMAKE_C_FLAGS_RELEASE} ${SHARED_COMPILE_FLAGS} -w")
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} ${SHARED_COMPILE_FLAGS} -w")
-
-# The normal LambdaMOO way: Optimizations and warnings enabled
-set(CMAKE_C_FLAGS_WARN   "${SHARED_COMPILE_FLAGS} -Wall -Wno-unused-parameter -Wno-sign-compare -Wno-switch")
-set(CMAKE_CXX_FLAGS_WARN "${CMAKE_C_FLAGS_WARN}")
-
-# Check for memory leaks: Minimal optimizations, debug enabled, and sanitize address
-set(CMAKE_C_FLAGS_LEAKCHECK  "-O1 -g -fsanitize=address -fno-omit-frame-pointer -fno-optimize-sibling-calls")
-set(CMAKE_CXX_FLAGS_LEAKCHECK "${CMAKE_C_FLAGS_LEAKCHECK}")
-if(CMAKE_BUILD_TYPE MATCHES "LeakCheck")
-    set(EXTRA_LINKER_FLAGS "-fsanitize=address")
+# For single-config generators (Make, Ninja), apply build-type-specific flags
+if(NOT CMAKE_CONFIGURATION_TYPES AND CMAKE_BUILD_TYPE)
+    string(TOUPPER ${CMAKE_BUILD_TYPE} CMAKE_BUILD_TYPE_UPPER)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE_UPPER}}")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE_UPPER}}")
 endif()
-
-string(TOUPPER ${CMAKE_BUILD_TYPE} CMAKE_BUILD_TYPE_UPPER)
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE_UPPER}}")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${CMAKE_BUILD_TYPE_UPPER}}")
 
 # Compatibility Checks Galore
 include(CheckStructHasMember)
@@ -123,10 +161,22 @@ bison_target(MOOParser src/parser.y ${CMAKE_BINARY_DIR}/parser.cc COMPILE_FLAGS 
 
 # Keywords.cc
 set(KEYWORDS ${CMAKE_BINARY_DIR}/keywords.cc)
-add_custom_command(
-    OUTPUT ${KEYWORDS}
-    COMMAND ${gperf_EXECUTABLE} --language=C++ --ignore-case --readonly-tables --struct-type --omit-struct-type --key-positions=1,3,$$ ${CMAKE_SOURCE_DIR}/src/keywords.gperf  > ${CMAKE_BINARY_DIR}/keywords.cc
-    COMMENT "Generating keywords.cc")
+# Note: --key-positions=1,3,$ means positions 1, 3, and end-of-word
+# We use OUTPUT_FILE instead of shell redirection for Windows compatibility
+# The $ needs to be escaped differently on Windows vs Unix
+if(WIN32)
+    # Use VERBATIM to pass $ literally to gperf
+    add_custom_command(
+        OUTPUT ${KEYWORDS}
+        COMMAND ${gperf_EXECUTABLE} --language=C++ --ignore-case --readonly-tables --struct-type --omit-struct-type "--key-positions=1,3,$" ${CMAKE_SOURCE_DIR}/src/keywords.gperf --output-file=${CMAKE_BINARY_DIR}/keywords.cc
+        COMMENT "Generating keywords.cc"
+        VERBATIM)
+else()
+    add_custom_command(
+        OUTPUT ${KEYWORDS}
+        COMMAND ${gperf_EXECUTABLE} --language=C++ --ignore-case --readonly-tables --struct-type --omit-struct-type --key-positions=1,3,$$ ${CMAKE_SOURCE_DIR}/src/keywords.gperf > ${CMAKE_BINARY_DIR}/keywords.cc
+        COMMENT "Generating keywords.cc")
+endif()
 
 # version_options.h
 execute_process(COMMAND ${PERL_EXECUTABLE} ${CMAKE_SOURCE_DIR}/src/include/version_opt_gen.pl)
@@ -143,7 +193,12 @@ add_custom_command(
 # Find packages. We don't do anything with the information yet because we need to know if things exist
 #                to modify the source files, so we have to do it before moo is defined. But we can't
 #                do the package setup UNTIL moo is defined.
-if(APPLE_SILICON_FOUND)
+if(WIN32)
+    # Windows uses native threads (std::thread backed by Windows threads)
+    set(CMAKE_USE_WIN32_THREADS_INIT 1)
+    set(CMAKE_USE_PTHREADS_INIT 0)
+    set(CMAKE_HAVE_THREADS_LIBRARY 1)
+elseif(APPLE_SILICON_FOUND)
     set(CMAKE_THREAD_LIBS_INIT "-lpthread")
     set(CMAKE_HAVE_THREADS_LIBRARY 1)
     set(CMAKE_USE_WIN32_THREADS_INIT 0)
@@ -171,12 +226,17 @@ endif()
 
 # Millions of source files
 set(src_CSRCS
-    src/dependencies/thpool.c
     src/dependencies/sosemanuk.c
-    src/dependencies/linenoise.c
     src/dependencies/strnatcmp.c
     src/http_parser.c
     src/regexpr.c)
+
+# thpool and linenoise: platform-specific builds
+if(NOT WIN32)
+    list(APPEND src_CSRCS src/dependencies/thpool.c)
+    # linenoise requires Unix terminal APIs (termios.h)
+    list(APPEND src_CSRCS src/dependencies/linenoise.c)
+endif()
 
 if(PCRE_FOUND)
     list(APPEND src_CSRCS src/dependencies/pcrs.c)
@@ -253,6 +313,11 @@ set(src_CXXSRCS
     src/spellcheck.cc
     src/curl.cc)
 
+# thpool: Use C++ version on Windows (std::thread instead of pthreads)
+if(WIN32)
+    list(APPEND src_CXXSRCS src/dependencies/thpool.cc)
+endif()
+
 set(src_GRAMMAR
     ${BISON_MOOParser_OUTPUTS})
 
@@ -267,17 +332,21 @@ set(src_SERVER
 add_executable(moo ${src_SERVER})
 
 # Make sure we have the packages we need
-include_directories(${NETTLE_INCLUDE_DIRS})
+include_directories(${NETTLE_INCLUDE_DIR})
 target_link_libraries(moo ${NETTLE_LIBRARIES})
-include_directories(${ARGON2_INCLUDE_DIRS})
+include_directories(${ARGON2_INCLUDE_DIR})
 target_link_libraries(moo ${ARGON2_LIBRARIES})
 
-if(CMAKE_USE_PTHREADS_INIT)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pthread")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread")
-else()
-    target_link_libraries(moo Threads::Threads)
+if(NOT WIN32)
+    # Unix threading
+    if(CMAKE_USE_PTHREADS_INIT)
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pthread")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread")
+    else()
+        target_link_libraries(moo Threads::Threads)
+    endif()
 endif()
+# Windows uses std::thread backed by native Windows threads - no additional libs needed
 
 if(PCRE_FOUND)
     include_directories(${PCRE_INCLUDE_DIRS})
@@ -314,13 +383,22 @@ CONFIGURE_FILE(${CMAKE_SOURCE_DIR}/src/include/config.h.cmake
     ${CMAKE_BINARY_DIR}/config.h)
 
 # Configure linker flags
-target_link_libraries(moo -lm ${EXTRA_LINKER_FLAGS})
-
-if(NOT APPLE)
-    target_link_libraries(moo -lcrypt)
+if(WIN32)
+    # Windows libraries
+    target_link_libraries(moo ws2_32 bcrypt ${EXTRA_LINKER_FLAGS})
+else()
+    # Unix libraries
+    target_link_libraries(moo m ${EXTRA_LINKER_FLAGS})
+    if(NOT APPLE)
+        target_link_libraries(moo crypt)
+    endif()
 endif()
 
-message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+if(CMAKE_BUILD_TYPE)
+    message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+else()
+    message(STATUS "Build type: Multi-config (use --config at build time)")
+endif()
 message(STATUS "C flags: ${CMAKE_C_FLAGS}")
 message(STATUS "CXX flags: ${CMAKE_CXX_FLAGS}")
 if(JEMALLOC_FOUND)

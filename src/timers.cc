@@ -15,11 +15,17 @@
     Pavel@Xerox.Com
  *****************************************************************************/
 
+#ifdef _WIN32
+#include "platform.h"
+#include <windows.h>
+#else
 #include <signal.h>
-#include <stdlib.h>
 #include <sys/time.h>
-#include <time.h>
 #include <unistd.h>
+#endif
+
+#include <stdlib.h>
+#include <time.h>
 
 #include "config.h"
 #include "timers.h"
@@ -99,6 +105,9 @@ virtual_wakeup_call(int signo)
 static void
 stop_timers()
 {
+#ifdef _WIN32
+    /* Windows: No signal-based timers, we use polling in check_timers() */
+#else
     alarm(0);
     signal(SIGALRM, SIG_IGN);
     signal(SIGALRM, wakeup_call);
@@ -119,11 +128,31 @@ stop_timers()
             virtual_timer->when = oitimer.it_value.tv_sec;
     }
 #endif
+#endif /* _WIN32 */
 }
 
 static void
 restart_timers()
 {
+#ifdef _WIN32
+    /* Windows: Timers are checked via polling in check_timers() */
+    /* If we're already late, fire the timer immediately */
+    while (active_timers) {
+        time_t now = time(nullptr);
+        if (now >= active_timers->when) {
+            Timer_Entry *t = active_timers;
+            Timer_Proc proc = t->proc;
+            Timer_ID id = t->id;
+            Timer_Data data = t->data;
+            active_timers = active_timers->next;
+            free_timer(t);
+            if (proc)
+                (*proc)(id, data);
+        } else {
+            break;
+        }
+    }
+#else
     if (active_timers) {
         time_t now = time(nullptr);
 
@@ -152,6 +181,7 @@ restart_timers()
             kill(getpid(), SIGVTALRM);
     }
 #endif
+#endif /* _WIN32 */
 }
 
 Timer_ID
@@ -240,8 +270,13 @@ timer_wakeup_interval(Timer_ID id)
 void
 timer_sleep(unsigned seconds)
 {
+#ifdef _WIN32
+    /* Windows: Use Sleep() instead of pause() */
+    Sleep(seconds * 1000);
+#else
     set_timer(seconds, nullptr, nullptr);
     pause();
+#endif
 }
 
 int
@@ -278,17 +313,19 @@ cancel_timer(Timer_ID id)
 void
 reenable_timers(void)
 {
-#if HAVE_SIGEMPTYSET
+#ifdef _WIN32
+    /* Windows: No signal blocking, timers use polling.
+     * Just check and fire any pending timers. */
+    restart_timers();
+#elif HAVE_SIGEMPTYSET
     sigset_t sigs;
 
     sigemptyset(&sigs);
     sigaddset(&sigs, SIGALRM);
     sigprocmask(SIG_UNBLOCK, &sigs, 0);
-#else
-#if HAVE_SIGRELSE
+#elif HAVE_SIGRELSE
     sigrelse(SIGALRM);      /* restore previous signal action */
 #else
 #error I need some way to stop blocking SIGALRM!
-#endif
 #endif
 }

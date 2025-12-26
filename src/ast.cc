@@ -341,7 +341,7 @@ free_expr(Expr * expr)
             break;
 
         case EXPR_CATCH:
-            free_expr(expr->e._catch._try);
+            free_expr(expr->e._catch.try_expr);
             free_arg_list(expr->e._catch.codes);
             if (expr->e._catch.except)
                 free_expr(expr->e._catch.except);

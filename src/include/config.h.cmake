@@ -13,19 +13,8 @@
 #   define SCNu32 "u"
 #   define SCNx32 "x"
 #else
-#   if !defined(__MACH__) && !defined(__arm__)
-#       define PRId64 "ld"
-#       define PRIi64 "li"
-#       define PRIo64 "lo"
-#       define PRIu64 "lu"
-#       define PRIx64 "lx"
-#       define PRIX64 "lX"
-#       define SCNd64 "ld"
-#       define SCNi64 "li"
-#       define SCNo64 "lo"
-#       define SCNu64 "lu"
-#       define SCNx64 "lx"
-#   else
+#   if defined(_MSC_VER) || defined(__MACH__) || defined(__arm__)
+        /* MSVC (LLP64), macOS, and ARM use long long for 64-bit */
 #       define PRId64 "lld"
 #       define PRIi64 "lli"
 #       define PRIo64 "llo"
@@ -37,6 +26,19 @@
 #       define SCNo64 "llo"
 #       define SCNu64 "llu"
 #       define SCNx64 "llx"
+#   else
+        /* Linux LP64 uses long for 64-bit */
+#       define PRId64 "ld"
+#       define PRIi64 "li"
+#       define PRIo64 "lo"
+#       define PRIu64 "lu"
+#       define PRIx64 "lx"
+#       define PRIX64 "lX"
+#       define SCNd64 "ld"
+#       define SCNi64 "li"
+#       define SCNo64 "lo"
+#       define SCNu64 "lu"
+#       define SCNx64 "lx"
 #   endif
 #endif
 
@@ -84,4 +86,11 @@
 
 #ifndef OPENSSL_FOUND
  #undef USE_TLS
+#endif
+
+/* MSVC compatibility - string comparison functions */
+#if defined(_MSC_VER)
+#include <string.h>
+#define strcasecmp _stricmp
+#define strncasecmp _strnicmp
 #endif

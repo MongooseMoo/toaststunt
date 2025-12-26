@@ -20,10 +20,13 @@
  *****************************************************************************/
 
 #include <sys/stat.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "platform.h"
 #include "collection.h"
 #include "config.h"
 #include "db.h"

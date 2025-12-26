@@ -631,8 +631,11 @@
 #       define MPLEX_STYLE MP_POLL
 #    elif HAVE_SELECT
 #      define MPLEX_STYLE MP_SELECT
+#    elif defined(_WIN32)
+       /* Windows uses select() via Winsock - define it here */
+#      define MPLEX_STYLE MP_SELECT
 #    else
-#      #error Could not find select() or poll()!
+#      error Could not find select() or poll()!
 #    endif
 #   endif
 #endif

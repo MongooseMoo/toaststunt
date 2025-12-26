@@ -9,13 +9,119 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
-#include <dirent.h>
-/* some things are not defined in stdio on all systems -- AAB 06/03/97 */
 #include <sys/types.h>
 #include <errno.h>
-#include <unistd.h>
 #include <ctype.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include "platform.h"
+#include <io.h>
+#include <direct.h>
+
+/* Simple Windows dirent.h implementation */
+struct dirent {
+    char d_name[260];  /* MAX_PATH */
+};
+typedef struct {
+    HANDLE hFind;
+    WIN32_FIND_DATAA findData;
+    struct dirent ent;
+    int first;
+} DIR;
+
+static DIR *opendir(const char *name) {
+    DIR *dir = (DIR *)malloc(sizeof(DIR));
+    if (!dir) return NULL;
+    char pattern[MAX_PATH];
+    snprintf(pattern, sizeof(pattern), "%s\\*", name);
+    dir->hFind = FindFirstFileA(pattern, &dir->findData);
+    if (dir->hFind == INVALID_HANDLE_VALUE) {
+        free(dir);
+        return NULL;
+    }
+    dir->first = 1;
+    return dir;
+}
+
+static struct dirent *readdir(DIR *dir) {
+    if (dir->first) {
+        dir->first = 0;
+    } else {
+        if (!FindNextFileA(dir->hFind, &dir->findData))
+            return NULL;
+    }
+    strncpy(dir->ent.d_name, dir->findData.cFileName, sizeof(dir->ent.d_name) - 1);
+    dir->ent.d_name[sizeof(dir->ent.d_name) - 1] = '\0';
+    return &dir->ent;
+}
+
+static int closedir(DIR *dir) {
+    if (dir) {
+        FindClose(dir->hFind);
+        free(dir);
+    }
+    return 0;
+}
+/* Windows stat macros that may be missing */
+#ifndef S_ISREG
+#define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
+#endif
+#ifndef S_ISDIR
+#define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
+#endif
+#ifndef S_ISSOCK
+#define S_ISSOCK(m) (0)  /* Windows doesn't have socket files */
+#endif
+#ifndef S_ISFIFO
+#define S_ISFIFO(m) (((m) & S_IFMT) == _S_IFIFO)
+#endif
+#ifndef S_ISBLK
+#define S_ISBLK(m) (0)   /* Windows doesn't have block devices */
+#endif
+#ifndef S_ISCHR
+#define S_ISCHR(m) (((m) & S_IFMT) == S_IFCHR)
+#endif
+#ifndef S_ISLNK
+#define S_ISLNK(m) (0)   /* Windows symlinks require different detection */
+#endif
+/* Windows mkdir only takes path, ignore mode */
+#define mkdir(path, mode) _mkdir(path)
+/* Windows chmod - only supports _S_IREAD and _S_IWRITE, map to _chmod */
+#define chmod _chmod
+
+/* Windows getline implementation */
+static ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
+    if (!lineptr || !n || !stream) {
+        errno = EINVAL;
+        return -1;
+    }
+    size_t pos = 0;
+    int c;
+    if (*lineptr == NULL || *n == 0) {
+        *n = 128;
+        *lineptr = (char *)malloc(*n);
+        if (!*lineptr) return -1;
+    }
+    while ((c = fgetc(stream)) != EOF) {
+        if (pos + 1 >= *n) {
+            size_t new_size = *n * 2;
+            char *new_ptr = (char *)realloc(*lineptr, new_size);
+            if (!new_ptr) return -1;
+            *lineptr = new_ptr;
+            *n = new_size;
+        }
+        (*lineptr)[pos++] = (char)c;
+        if (c == '\n') break;
+    }
+    if (pos == 0 && c == EOF) return -1;
+    (*lineptr)[pos] = '\0';
+    return (ssize_t)pos;
+}
+#else
+#include <dirent.h>
+#include <unistd.h>
+#endif
 #include "structures.h"
 #include "bf_register.h"
 #include "functions.h"
@@ -276,7 +382,7 @@ static int file_verify_caller(Objid progr) {
 static int file_verify_path(const char *pathname) {
     /*
     *  A pathname is OK does not contain a
-     *  any of instances the substring "/."
+     *  any of instances the substring "/." or "\."
      */
 
     if (pathname[0] == '\0')
@@ -287,6 +393,12 @@ static int file_verify_path(const char *pathname) {
 
     if (strindex(pathname, strlen(pathname), "/.", 2, 0))
         return 0;
+
+#ifdef _WIN32
+    /* Also check for backslash-dot on Windows */
+    if (strindex(pathname, strlen(pathname), "\\.", 2, 0))
+        return 0;
+#endif
 
     return 1;
 }
@@ -325,8 +437,14 @@ const char *file_resolve_path(const char *pathname) {
         return nullptr;
 
     stream_add_string(s, file_subdir);
+#ifdef _WIN32
+    /* Handle both forward and back slashes on Windows */
+    if (pathname[0] == '/' || pathname[0] == '\\')
+        stream_add_string(s, pathname + 1);
+#else
     if (pathname[0] == '/')
         stream_add_string(s, pathname + 1);
+#endif
     else
         stream_add_string(s, pathname);
 

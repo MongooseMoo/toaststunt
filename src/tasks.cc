@@ -15,12 +15,18 @@
     Pavel@Xerox.Com
  *****************************************************************************/
 
-#include <sys/socket.h>
 #include <stdlib.h>
-#include <sys/time.h>
 #include <math.h>
 #include <string.h>
 #include <time.h>
+
+#ifdef _WIN32
+#include "platform.h"
+#include <winsock2.h>
+#else
+#include <sys/socket.h>
+#include <sys/time.h>
+#endif
 
 #include "config.h"
 #include "db.h"

@@ -1,6 +1,10 @@
 #ifndef EXTENSION_PCRE_H
 #define EXTENSION_PCRE_H
 
+#include "config.h"
+
+#ifdef PCRE_FOUND
+
 #ifndef _PCRE_H
 #include <pcre.h>
 #endif
@@ -32,5 +36,7 @@ extern void pcre_shutdown(void);
 #include <sqlite3.h>
 extern void sqlite_regexp(sqlite3_context *ctx, int argc, sqlite3_value **argv);
 #endif
+
+#endif /* PCRE_FOUND */
 
 #endif /* EXTENSION_PCRE_H */

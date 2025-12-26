@@ -15,7 +15,18 @@
     Pavel@Xerox.Com
  *****************************************************************************/
 
+#ifdef _WIN32
+#include "platform.h"
+#include <malloc.h>  /* for _alloca */
+#define alloca _alloca
+/* MSVC uses DECIMAL_DIG instead of GCC's __DECIMAL_DIG__ */
+#ifndef __DECIMAL_DIG__
+#define __DECIMAL_DIG__ DECIMAL_DIG
+#endif
+#else
 #include <sys/types.h> //for u_int64_t
+#include <alloca.h>
+#endif
 #include <limits.h>
 #include <errno.h>
 #include <float.h>
@@ -682,6 +693,13 @@ bf_ctime(Var arglist, Byte next, void *vdata, Objid progr)
 #define CLOCK_MONOTONIC_RAW CLOCK_MONOTONIC
 #endif
 
+#ifdef _WIN32
+/* Windows doesn't have CLOCK_MONOTONIC_RAW, fall back to CLOCK_MONOTONIC */
+#ifndef CLOCK_MONOTONIC_RAW
+#define CLOCK_MONOTONIC_RAW CLOCK_MONOTONIC
+#endif
+#endif
+
 /* Returns a float representing seconds and nanoseconds since the Epoch.
    Optional arguments specify monotonic time; 1: Monotonic. 2. Monotonic raw.
    (seconds since an arbitrary period of time. More useful for timing
@@ -807,7 +825,7 @@ bf_random_bytes(Var arglist, Byte next, void *vdata, Objid progr)
         return p;
     }
 
-    unsigned char out[len];
+    unsigned char *out = (unsigned char *)alloca(len);
 
     sosemanuk_prng(&run_context, out, len);
 

@@ -20,7 +20,16 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+
+#ifdef _WIN32
+#include "platform.h"
+/* Windows uses localtime_s with reversed argument order */
+static inline struct tm *localtime_r(const time_t *timep, struct tm *result) {
+    return localtime_s(result, timep) == 0 ? result : NULL;
+}
+#else
 #include <unistd.h>
+#endif
 
 #include "bf_register.h"
 #include "config.h"

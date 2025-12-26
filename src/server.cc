@@ -19,6 +19,107 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <string>
+#include <sstream>
+#include <fstream>
+#include <vector>
+#include <mutex>
+
+#ifdef _WIN32
+#include "platform.h"
+#include <signal.h>         /* signal(), SIG_DFL, SIGINT, SIGTERM, etc. */
+#include <psapi.h>          /* GetProcessMemoryInfo */
+
+/* Process stubs - Windows doesn't support fork/wait */
+static inline pid_t fork(void) { return -1; }  /* Always fails - use UNFORKED_CHECKPOINTS */
+static inline pid_t wait(int *status) { (void)status; return -1; }
+static inline pid_t waitpid(pid_t pid, int *status, int options) {
+    (void)pid; (void)status; (void)options; return -1;
+}
+
+/* getopt_long for Windows */
+struct option {
+    const char *name;
+    int has_arg;
+    int *flag;
+    int val;
+};
+#define no_argument 0
+#define required_argument 1
+#define optional_argument 2
+
+/* Simple getopt implementation for Windows */
+int optind = 1;
+char *optarg = nullptr;
+static int optpos = 1;
+
+static int getopt(int argc, char *const argv[], const char *optstring) {
+    if (optind >= argc || argv[optind] == nullptr) return -1;
+
+    const char *arg = argv[optind];
+    if (arg[0] != '-' || arg[1] == '\0') return -1;
+    if (arg[1] == '-' && arg[2] == '\0') { optind++; return -1; } /* -- */
+
+    char c = arg[optpos];
+    const char *p = strchr(optstring, c);
+
+    if (p == nullptr || c == ':') {
+        if (arg[++optpos] == '\0') { optind++; optpos = 1; }
+        return '?';
+    }
+
+    if (p[1] == ':') {  /* Option requires argument */
+        if (arg[optpos + 1] != '\0') {
+            optarg = const_cast<char*>(&arg[optpos + 1]);
+        } else if (++optind < argc) {
+            optarg = argv[optind];
+        } else {
+            optpos = 1;
+            return '?';  /* Missing argument */
+        }
+        optind++;
+        optpos = 1;
+    } else {
+        if (arg[++optpos] == '\0') { optind++; optpos = 1; }
+    }
+
+    return c;
+}
+
+/* Simple getopt_long that falls back to getopt - ignores long options */
+static inline int getopt_long(int argc, char *const argv[], const char *optstring,
+                              const struct option *longopts, int *longindex) {
+    (void)longopts; (void)longindex;
+    return getopt(argc, argv, optstring);
+}
+
+/* Stub for getrusage - Windows has limited process stats */
+#define RUSAGE_SELF 0
+struct rusage {
+    struct timeval ru_utime;
+    struct timeval ru_stime;
+    long ru_maxrss;
+    long ru_minflt;
+    long ru_majflt;
+    long ru_inblock;
+    long ru_oublock;
+    long ru_nvcsw;
+    long ru_nivcsw;
+    long ru_nsignals;
+};
+static inline int getrusage(int who, struct rusage *usage) {
+    (void)who;
+    memset(usage, 0, sizeof(*usage));
+    /* Could use GetProcessTimes for ru_utime/ru_stime if needed */
+    return 0;
+}
+#else
 #include <sys/time.h>       // getrusage
 #include <sys/resource.h>   // getrusage
 #if !defined(__FreeBSD__) && !defined(__MACH__)
@@ -28,22 +129,12 @@
 #include <mach/mach.h>
 #include <sys/sysctl.h>
 #endif
-
-#include <string>
-#include <sstream>
-#include <fstream>
-#include <vector>
-#include <mutex>
 #include <getopt.h>
-#include <sys/types.h>      /* must be first on some systems */
 #include <signal.h>
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <netinet/in.h>
+#endif
 
 #include "config.h"
 #include "db.h"
@@ -84,9 +175,11 @@
 #include <jemalloc/jemalloc.h>
 #endif
 
+#ifndef _WIN32
 extern "C" {
 #include "dependencies/linenoise.h"
 }
+#endif
 
 #define RANDOM_DEVICE "/dev/urandom"
 
@@ -282,16 +375,22 @@ abort_server(void)
     signal(SIGINT, SIG_DFL);
     signal(SIGTERM, SIG_DFL);
     signal(SIGFPE, SIG_DFL);
+#ifndef _WIN32
     signal(SIGHUP, SIG_DFL);
+#endif
     signal(SIGILL, SIG_DFL);
+#ifndef _WIN32
     signal(SIGQUIT, SIG_DFL);
+#endif
     signal(SIGSEGV, SIG_DFL);
 #ifdef SIGBUS
     signal(SIGBUS, SIG_DFL);
 #endif
+#ifndef _WIN32
     signal(SIGUSR1, SIG_DFL);
     signal(SIGUSR2, SIG_DFL);
     signal(SIGCHLD, SIG_DFL);
+#endif
 
     abort();
 }
@@ -459,6 +558,16 @@ child_completed_signal(int sig)
 static void
 setup_signals(void)
 {
+#ifdef _WIN32
+    /* Windows only supports a limited set of signals.
+     * SIGINT and SIGTERM work, but most others don't.
+     * Use SetConsoleCtrlHandler for Ctrl+C handling. */
+    signal(SIGFPE, SIG_IGN);
+    signal(SIGILL, panic_signal);
+    signal(SIGSEGV, panic_signal);
+    signal(SIGINT, shutdown_signal);
+    signal(SIGTERM, shutdown_signal);
+#else
     signal(SIGFPE, SIG_IGN);
     if (signal(SIGHUP, panic_signal) == SIG_IGN)
         signal(SIGHUP, SIG_IGN);
@@ -475,6 +584,7 @@ setup_signals(void)
     signal(SIGUSR2, handle_user_defined_signal);
 
     signal(SIGCHLD, child_completed_signal);
+#endif
 }
 
 static void
@@ -1000,6 +1110,22 @@ read_stdin_line(const char *prompt)
 
     fflush(stdout);
 
+#ifdef _WIN32
+    /* Simple fallback for Windows - no readline-style editing */
+    static char buf[1024];
+    printf("%s", prompt);
+    fflush(stdout);
+    if (fgets(buf, sizeof(buf), stdin)) {
+        size_t len = strlen(buf);
+        if (len > 0 && buf[len-1] == '\n')
+            buf[len-1] = '\0';
+        if (*buf) {
+            stream_add_string(s, buf);
+            return reset_stream(s);
+        }
+    }
+    return (char *)"";
+#else
     char *line;
 
     if ((line = linenoise(prompt)) && *line) {
@@ -1010,6 +1136,7 @@ read_stdin_line(const char *prompt)
     }
 
     return (char *)"";
+#endif
 }
 
 static void
@@ -1342,6 +1469,14 @@ init_random(void)
 
 #ifndef TEST
 
+#ifdef _WIN32
+    /* Windows: use BCryptGenRandom via platform.h */
+    oklog("RANDOM: seeding from Windows crypto API\n");
+    if (get_random_bytes(soskey, sizeof(soskey)) != 0) {
+        errlog("Can't get random bytes from Windows crypto API!\n");
+        exit(1);
+    }
+#else
     oklog("RANDOM: seeding from " RANDOM_DEVICE "\n");
 
     int fd;
@@ -1362,6 +1497,7 @@ init_random(void)
     }
 
     close(fd);
+#endif /* _WIN32 */
 
 #else /* #ifndef TEST */
 
@@ -2175,10 +2311,20 @@ main(int argc, char **argv)
 
     /* Now that it's so easy to change file / exec directories, it's easy to forget the last '/'
        We'll helpfully add it back to avoid confusion. */
+#ifdef _WIN32
+    /* On Windows, accept both / and \ as path separators */
+    char lastchar_file = file_subdir[strlen(file_subdir) - 1];
+    char lastchar_exec = exec_subdir[strlen(exec_subdir) - 1];
+    if (lastchar_file != '/' && lastchar_file != '\\')
+        asprintf(&file_subdir, "%s/", file_subdir);
+    if (lastchar_exec != '/' && lastchar_exec != '\\')
+        asprintf(&exec_subdir, "%s/", exec_subdir);
+#else
     if (file_subdir[strlen(file_subdir) - 1] != '/')
         asprintf(&file_subdir, "%s/", file_subdir);
     if (exec_subdir[strlen(exec_subdir) - 1] != '/')
         asprintf(&exec_subdir, "%s/", exec_subdir);
+#endif
 
     applog(LOG_INFO1, " _   __           _____                ______\n");
     applog(LOG_INFO1, "( `^` ))  ___________  /_____  _________ __  /_\n");
@@ -2354,7 +2500,9 @@ main(int argc, char **argv)
     db_clear_ancestor_cache();
     sqlite_shutdown();
     curl_shutdown();
+#ifdef PCRE_FOUND
     pcre_shutdown();
+#endif
 
     free_str(this_program);
 
@@ -2536,13 +2684,14 @@ bf_usage(Var arglist, Byte next, void *vdata, Objid progr)
     for (x = 1; x <= 3; x++)
         cpu.v.list[x] = Var::new_int(0); //initialize to all 0
 
-#if !defined(__FreeBSD__) && !defined(__MACH__)
+#if !defined(__FreeBSD__) && !defined(__MACH__) && !defined(_WIN32)
     struct sysinfo sys_info;
     int info_ret = sysinfo(&sys_info);
 
     for (x = 0; x < 3; x++)
         cpu.v.list[x + 1].v.num = (info_ret != 0 ? 0 : sys_info.loads[x]);
 #else
+    /* Windows and FreeBSD/macOS: sysinfo not available, leave cpu at 0 */
     /*** Begin CPU load averages ***/
 #ifdef __MACH__
     struct loadavg load;

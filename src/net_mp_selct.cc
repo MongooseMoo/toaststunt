@@ -19,8 +19,14 @@
 
 #include <errno.h>		/* errno */
 #include <string.h>		/* bzero() or memset(), used in FD_ZERO */
+
+#ifdef _WIN32
+#include <winsock2.h>
+/* Windows select() is in winsock2.h */
+#else
 #include <sys/time.h>	/* select(), struct timeval */
 #include <sys/types.h>		/* fd_set, FD_ZERO(), FD_SET(), FD_ISSET() */
+#endif
 
 #include "log.h"
 #include "net_mplex.h"
@@ -64,8 +70,14 @@ mplex_wait(unsigned timeout)
     n = select(max_descriptor + 1, &input, &output, nullptr, &tv);
 
     if (n < 0) {
+#ifdef _WIN32
+	int err = WSAGetLastError();
+	if (err != WSAEINTR)
+	    errlog("Waiting for network I/O: WSA error %d\n", err);
+#else
 	if (errno != EINTR)
 	    log_perror("Waiting for network I/O");
+#endif
 	return 1;
     } else
 	return (n == 0);

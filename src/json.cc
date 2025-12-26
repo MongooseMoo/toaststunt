@@ -32,6 +32,12 @@
 
 #include <string.h>
 #include <stdlib.h>
+#ifdef _WIN32
+#include <malloc.h>
+#define alloca _alloca
+#else
+#include <alloca.h>
+#endif
 
 #include "functions.h"
 #include "json.h"
@@ -282,7 +288,7 @@ handle_string(void *ctx, const unsigned char *stringVal, unsigned int stringLen)
             }
             case TYPE_ERR:
             {
-                char temp[len + 1];
+                char *temp = (char *)alloca(len + 1);
                 strncpy(temp, val, len);
                 temp[len] = '\0';
                 v.type = TYPE_ERR;
@@ -292,7 +298,7 @@ handle_string(void *ctx, const unsigned char *stringVal, unsigned int stringLen)
             }
             case TYPE_STR:
             {
-                char temp[len + 1];
+                char *temp = (char *)alloca(len + 1);
                 strncpy(temp, val, len);
                 temp[len] = '\0';
                 v.type = TYPE_STR;
@@ -303,7 +309,7 @@ handle_string(void *ctx, const unsigned char *stringVal, unsigned int stringLen)
                 panic_moo("Unsupported type in handle_string()");
         }
     } else {
-        char temp[len + 1];
+        char *temp = (char *)alloca(len + 1);
         strncpy(temp, val, len);
         temp[len] = '\0';
         v.type = TYPE_STR;

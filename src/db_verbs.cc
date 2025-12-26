@@ -21,6 +21,7 @@
 
 #include <assert.h>
 #include <ctype.h>
+#include <stdint.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -577,7 +578,7 @@ try_again:
 
         assert(o != nullptr);
 
-        unsigned long first_parent_with_verbs = (unsigned long)o;
+        uintptr_t first_parent_with_verbs = (uintptr_t)o;
 
         /* found something with verbdefs, now check the cache */
         unsigned int hash, bucket;

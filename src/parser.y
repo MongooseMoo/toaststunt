@@ -25,6 +25,7 @@
 #include "my-math.h"
 #include <stdlib.h>
 #include <string.h>
+#include "platform.h"
 #include "ast.h"
 #include "code_gen.h"
 #include "config.h"
@@ -653,7 +654,7 @@ expr:
 	| '`' expr '!' codes default '\''
 		{
 		    $$ = alloc_expr(EXPR_CATCH);
-		    $$->e._catch._try = $2;
+		    $$->e._catch.try_expr = $2;
 		    $$->e._catch.codes = $4;
 		    $$->e._catch.except = $5;
 		}

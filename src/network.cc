@@ -17,25 +17,60 @@
 
 #include <ctype.h>
 #include <fcntl.h>
+#include <stdio.h>
+#include <errno.h>
+#include <stdlib.h>         /* strtoul() */
+#include <string.h>         /* memcpy() */
+#include <atomic>
+#include <vector>
+
+#ifdef _WIN32
+#include "platform.h"
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <mstcpip.h>        /* SIO_KEEPALIVE_VALS */
+/* Windows socket compatibility */
+#define close closesocket
+#define SHUT_RDWR SD_BOTH
+typedef int socklen_t;
+/* Windows error codes */
+#define EADDRNOTAVAIL WSAEADDRNOTAVAIL
+#define ECONNREFUSED WSAECONNREFUSED
+#define ENETUNREACH WSAENETUNREACH
+#define ETIMEDOUT WSAETIMEDOUT
+/* Use SRWLOCK as lightweight mutex */
+typedef SRWLOCK pthread_mutex_t;
+#define pthread_mutex_init(m, attr) InitializeSRWLock(m)
+#define pthread_mutex_destroy(m)    /* no-op for SRWLOCK */
+#define pthread_mutex_lock(m)       AcquireSRWLockExclusive(m)
+#define pthread_mutex_unlock(m)     ReleaseSRWLockExclusive(m)
+/* ioctl -> ioctlsocket */
+#define ioctl ioctlsocket
+/* For sockets, use closesocket instead of close */
+#define SOCKET_CLOSE(s) closesocket(s)
+/* For sockets, use recv/send instead of read/write */
+#define SOCKET_READ(s, buf, len) recv(s, buf, len, 0)
+#define SOCKET_WRITE(s, buf, len) send(s, buf, len, 0)
+#else
+#define SOCKET_CLOSE(s) close(s)
+#define SOCKET_READ(s, buf, len) read(s, buf, len)
+#define SOCKET_WRITE(s, buf, len) write(s, buf, len)
+#endif
+
+#ifndef _WIN32
 #include <sys/ioctl.h>
 #include <signal.h>
-#include <stdio.h>
 #include <pthread.h>
 #include <arpa/inet.h>      /* inet_addr() */
-#include <errno.h>          /* EMFILE, EADDRNOTAVAIL, ECONNREFUSED,
-                             * ENETUNREACH, ETIMEOUT */
 #include <netinet/in.h>     /* struct sockaddr_in, INADDR_ANY, htons(),
                              * htonl(), ntohl(), struct in_addr */
 #include <sys/socket.h>     /* socket(), AF_INET, SOCK_STREAM,
                              * setsockopt(), SOL_SOCKET, SO_REUSEADDR,
                              * bind(), struct sockaddr, accept(),
                              * connect() */
-#include <stdlib.h>         /* strtoul() */
-#include <string.h>         /* memcpy() */
 #include <unistd.h>         /* close() */
 #include <netinet/tcp.h>
-#include <atomic>
-#include <vector>
+#endif
 
 #include "options.h"
 #include "config.h"
@@ -249,7 +284,11 @@ network_set_nonblocking(int fd)
     /* Prefer this implementation, since the second one fails on some SysV
      * platforms, including HP/UX.
      */
+#ifdef _WIN32
+    u_long yes = 1;
+#else
     int yes = 1;
+#endif
 
     if (ioctl(fd, FIONBIO, &yes) < 0)
         return 0;
@@ -285,7 +324,7 @@ push_network_buffer_overflow(nhandle *h)
         count = SSL_write(h->tls, buf, length);
     else
 #endif
-        count = write(h->wfd, buf, length);
+        count = SOCKET_WRITE(h->wfd, buf, length);
 
     if (count == length) {
         h->output_lines_flushed = 0;
@@ -339,7 +378,7 @@ push_output(nhandle * h)
             count = SSL_write(h->tls, b->start, b->length);
         else
 #endif
-            count = write(h->wfd, b->start, b->length);
+            count = SOCKET_WRITE(h->wfd, b->start, b->length);
 #ifdef USE_TLS
         if (count <= 0) {
             if (h->tls) {
@@ -541,7 +580,7 @@ pull_input(nhandle * h)
         }
     } else
 #endif
-        count = read(h->rfd, buffer, sizeof(buffer));
+        count = SOCKET_READ(h->rfd, buffer, sizeof(buffer));
 
     if (count > 0) {
         if (h->binary) {
@@ -695,13 +734,13 @@ void
 network_close_connection(int read_fd, int write_fd)
 {
     /* read_fd and write_fd are the same, so we only need to deal with one. */
-    close(read_fd);
+    SOCKET_CLOSE(read_fd);
 }
 
 void
 close_listener(int fd)
 {
-    close(fd);
+    SOCKET_CLOSE(fd);
 }
 
 static nhandle *
@@ -762,7 +801,7 @@ accept_new_connection(nlistener * l)
             break;
         case PA_FULL:
             for (i = 0; i < proto.pocket_size; i++)
-                close(pocket_descriptors[i]);
+                SOCKET_CLOSE(pocket_descriptors[i]);
             if (network_accept_connection(l->fd, &rfd, &wfd, &name, &ip_addr, &port, &protocol USE_TLS_BOOL SSL_CONTEXT_2_ARG TLS_CERT_PATH) != PA_OKAY) {
                 errlog("Can't accept connection even by emptying pockets!\n");
             } else {
@@ -897,23 +936,23 @@ make_listener(Var desc, int *fd, const char **name, const char **ip_address,
             continue;
         }
 
-        if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) < 0) {
+        if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(int)) < 0) {
             log_perror("Error setting listening socket reuseaddr");
-            close(s);
+            SOCKET_CLOSE(s);
             freeaddrinfo(servinfo);
             return E_QUOTA;
         }
 
-        if (use_ipv6 && setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, &yes, sizeof yes) < 0) {
+        if (use_ipv6 && setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, (const char*)&yes, sizeof yes) < 0) {
             log_perror("Error disabling listening socket dual-stack mode for IPv6");
-            close(s);
+            SOCKET_CLOSE(s);
             freeaddrinfo(servinfo);
             return E_QUOTA;
         }
 
         if (bind(s, p->ai_addr, p->ai_addrlen) < 0) {
             log_perror("Error binding listening socket");
-            close(s);
+            SOCKET_CLOSE(s);
             continue;
         }
         break;
@@ -1098,9 +1137,9 @@ open_connection(Var arglist, int *read_fd, int *write_fd,
             continue;
         }
 
-        if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
+        if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(int)) == -1) {
             log_perror("Error setting listening socket options");
-            close(s);
+            SOCKET_CLOSE(s);
             freeaddrinfo(servinfo);
             return make_raise_pack(E_QUOTA, "Error setting listening socket options", zero);
         }
@@ -1160,7 +1199,7 @@ open_connection(Var arglist, int *read_fd, int *write_fd,
     }
 
     if (result < 0) {
-        close(s);
+        SOCKET_CLOSE(s);
         freeaddrinfo(servinfo);
         if (errno == EADDRNOTAVAIL ||
                 errno == ECONNREFUSED ||
@@ -1228,6 +1267,16 @@ network_initialize(int argc, char **argv, Var *desc)
 {
     uint16_t port = 0;
 
+#ifdef _WIN32
+    /* Initialize Winsock - required before any socket operations */
+    WSADATA wsaData;
+    int wsaResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (wsaResult != 0) {
+        errlog("NETWORK: WSAStartup failed with error: %d\n", wsaResult);
+        return 0;
+    }
+#endif
+
     proto.pocket_size = 1;
     proto.believe_eof = 1;
     proto.eol_out_string = "\r\n";
@@ -1283,7 +1332,9 @@ network_initialize(int argc, char **argv, Var *desc)
     get_pocket_descriptors();
 
     /* we don't care about SIGPIPE, we notice it in mplex_wait() and write() */
+#ifndef _WIN32
     signal(SIGPIPE, SIG_IGN);
+#endif
 
     return 1;
 }
@@ -1795,18 +1846,34 @@ network_set_client_keep_alive(network_handle nh, Var map)
             count = value.v.num;        
     }
 
-    if (setsockopt(h->rfd, SOL_SOCKET, SO_KEEPALIVE, &keep_alive, sizeof(keep_alive)) < 0 ||
-#ifndef __MACH__
-setsockopt(h->rfd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle)) < 0 ||
+#ifdef _WIN32
+    /* Windows uses WSAIoctl with SIO_KEEPALIVE_VALS */
+    struct tcp_keepalive keepalive_vals;
+    DWORD bytes_returned;
+    keepalive_vals.onoff = keep_alive;
+    keepalive_vals.keepalivetime = idle * 1000;      /* Convert to milliseconds */
+    keepalive_vals.keepaliveinterval = interval * 1000;
+    if (WSAIoctl(h->rfd, SIO_KEEPALIVE_VALS, &keepalive_vals, sizeof(keepalive_vals),
+                 NULL, 0, &bytes_returned, NULL, NULL) != 0)
+    {
+        log_perror("TCP keepalive WSAIoctl failed");
+        return 0;
+    }
 #else
-setsockopt(h->rfd, IPPROTO_TCP, TCP_KEEPALIVE, &idle, sizeof(idle)) < 0 ||
+    if (setsockopt(h->rfd, SOL_SOCKET, SO_KEEPALIVE, (const char*)&keep_alive, sizeof(keep_alive)) < 0 ||
+#ifndef __MACH__
+        setsockopt(h->rfd, IPPROTO_TCP, TCP_KEEPIDLE, (const char*)&idle, sizeof(idle)) < 0 ||
+#else
+        setsockopt(h->rfd, IPPROTO_TCP, TCP_KEEPALIVE, (const char*)&idle, sizeof(idle)) < 0 ||
 #endif
-        setsockopt(h->rfd, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval)) < 0 ||
-        setsockopt(h->rfd, IPPROTO_TCP, TCP_KEEPCNT, &count, sizeof(count)) < 0) 
+        setsockopt(h->rfd, IPPROTO_TCP, TCP_KEEPINTVL, (const char*)&interval, sizeof(interval)) < 0 ||
+        setsockopt(h->rfd, IPPROTO_TCP, TCP_KEEPCNT, (const char*)&count, sizeof(count)) < 0)
     {
         log_perror("TCP keepalive setsockopt failed");
         return 0;
-    } else {
+    }
+#endif
+    {
         h->keep_alive = keep_alive;
         h->keep_alive_idle = idle;
         h->keep_alive_interval = interval;
@@ -1872,6 +1939,10 @@ network_shutdown(void)
 
     while (all_nlisteners)
         close_nlistener(all_nlisteners);
+
+#ifdef _WIN32
+    WSACleanup();
+#endif
 }
 
 Var

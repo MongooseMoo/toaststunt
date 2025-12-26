@@ -31,6 +31,11 @@
 #define Exec_H 1
 
 #include "config.h"
+#ifdef _WIN32
+#include "platform.h"
+#else
+#include <sys/types.h>
+#endif
 
 extern char *exec_subdir;
 

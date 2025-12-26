@@ -45,7 +45,12 @@
 #include "utils.h"
 #include "options.h"
 #include "server.h"
+
+#ifdef _WIN32
+#include "platform.h"
+#else
 #include <sys/utsname.h>
+#endif
 
 /*
  * Server executable version
@@ -70,11 +75,15 @@ const char *operating_system_name()
 {
     char *os_name;
 
+#ifdef _WIN32
+    asprintf(&os_name, "Windows");
+#else
     struct utsname name;
     if (uname(&name))
         asprintf(&os_name, "unknown");
     else
         asprintf(&os_name, "%s", name.sysname);
+#endif
 
     return os_name;
 }

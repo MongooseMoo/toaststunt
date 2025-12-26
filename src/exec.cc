@@ -31,10 +31,26 @@
 #include <sys/stat.h>
 
 #include <fcntl.h>
-#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include "platform.h"
+#include <windows.h>
+#include <io.h>
+#include <process.h>
+/* Windows doesn't use signals for child process notification */
+#define SIGCHLD 0
+/* sig_atomic_t is not in MinGW's headers without signal.h */
+typedef int sig_atomic_t;
+/* S_ISREG macro - check if file is regular file */
+#ifndef S_ISREG
+#define S_ISREG(m) (((m) & _S_IFMT) == _S_IFREG)
+#endif
+#else
+#include <signal.h>
 #include <unistd.h>
+#endif
 
 #include "network.h"
 
@@ -75,18 +91,31 @@ typedef struct task_waiting_on_exec {
     Stream *sout;
     Stream *serr;
     vm the_vm;
+#ifdef _WIN32
+    HANDLE hProcess;        /* Process handle for WaitForSingleObject */
+    HANDLE hStdoutRead;     /* Pipe handles for reading stdout/stderr */
+    HANDLE hStderrRead;
+    HANDLE hReaderThread;   /* Handle to the reader thread */
+#endif
 } task_waiting_on_exec;
 
 static task_waiting_on_exec *process_table[EXEC_MAX_PROCESSES];
 
 volatile static sig_atomic_t sigchild_interrupt = 0;
 
+#ifdef _WIN32
+/* Windows: Use critical section instead of signal blocking */
+static CRITICAL_SECTION exec_cs;
+static int exec_cs_initialized = 0;
+#define BLOCK_SIGCHLD do { if (exec_cs_initialized) EnterCriticalSection(&exec_cs); } while(0)
+#define UNBLOCK_SIGCHLD do { if (exec_cs_initialized) LeaveCriticalSection(&exec_cs); } while(0)
+#else
 static sigset_t block_sigchld;
-
-static Stream *logmsg = new_stream(30);
-
 #define BLOCK_SIGCHLD sigprocmask(SIG_BLOCK, &block_sigchld, NULL)
 #define UNBLOCK_SIGCHLD sigprocmask(SIG_UNBLOCK, &block_sigchld, NULL)
+#endif
+
+static Stream *logmsg = new_stream(30);
 
 static task_waiting_on_exec *
 malloc_task_waiting_on_exec()
@@ -123,10 +152,22 @@ free_task_waiting_on_exec(task_waiting_on_exec * tw)
     }
     if (tw->in)
         free_str(tw->in);
+#ifdef _WIN32
+    /* Close Windows handles */
+    if (tw->hStdoutRead)
+        CloseHandle(tw->hStdoutRead);
+    if (tw->hStderrRead)
+        CloseHandle(tw->hStderrRead);
+    if (tw->hProcess)
+        CloseHandle(tw->hProcess);
+    if (tw->hReaderThread)
+        CloseHandle(tw->hReaderThread);
+#else
     close(tw->fout);
     close(tw->ferr);
     network_unregister_fd(tw->fout);
     network_unregister_fd(tw->ferr);
+#endif
     if (tw->sout)
         free_stream(tw->sout);
     if (tw->serr)
@@ -197,6 +238,221 @@ stderr_readable(int fd, void *data)
     }
 }
 
+#ifdef _WIN32
+/*
+ * Windows process reader thread.
+ * Reads stdout/stderr, waits for process exit, then signals completion.
+ */
+static DWORD WINAPI
+exec_reader_thread(LPVOID lpParam)
+{
+    task_waiting_on_exec *tw = (task_waiting_on_exec *)lpParam;
+    char buffer[1000];
+    DWORD bytesRead;
+    DWORD exitCode = 0;
+
+    /* Read stdout until EOF */
+    while (ReadFile(tw->hStdoutRead, buffer, sizeof(buffer), &bytesRead, NULL) && bytesRead > 0) {
+        EnterCriticalSection(&exec_cs);
+        stream_add_string(tw->sout, raw_bytes_to_binary(buffer, bytesRead));
+        LeaveCriticalSection(&exec_cs);
+    }
+
+    /* Read stderr until EOF */
+    while (ReadFile(tw->hStderrRead, buffer, sizeof(buffer), &bytesRead, NULL) && bytesRead > 0) {
+        EnterCriticalSection(&exec_cs);
+        stream_add_string(tw->serr, raw_bytes_to_binary(buffer, bytesRead));
+        LeaveCriticalSection(&exec_cs);
+    }
+
+    /* Wait for process to exit */
+    WaitForSingleObject(tw->hProcess, INFINITE);
+    GetExitCodeProcess(tw->hProcess, &exitCode);
+
+    /* Signal completion */
+    EnterCriticalSection(&exec_cs);
+    if (TWS_CONTINUE == tw->status) {
+        tw->status = TWS_STOP;
+        tw->code = (int)exitCode;
+    }
+    sigchild_interrupt = 1;
+    LeaveCriticalSection(&exec_cs);
+
+    return 0;
+}
+
+/* Windows: Use CreateProcess instead of fork/exec */
+static pid_t
+fork_and_exec(const char *cmd, const char *const args[], const char *const env[],
+              int *in, int *out, int *err, task_waiting_on_exec *tw)
+{
+    HANDLE hStdinRead = NULL, hStdinWrite = NULL;
+    HANDLE hStdoutRead = NULL, hStdoutWrite = NULL;
+    HANDLE hStderrRead = NULL, hStderrWrite = NULL;
+    SECURITY_ATTRIBUTES sa;
+    PROCESS_INFORMATION pi;
+    STARTUPINFOA si;
+    BOOL success = FALSE;
+
+    /* Set up security attributes for inheritable handles */
+    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = NULL;
+
+    /* Create pipes for stdin, stdout, stderr */
+    if (!CreatePipe(&hStdinRead, &hStdinWrite, &sa, 0)) {
+        log_perror("EXEC: Couldn't create stdin pipe");
+        goto fail;
+    }
+    /* Make stdin write end non-inheritable */
+    SetHandleInformation(hStdinWrite, HANDLE_FLAG_INHERIT, 0);
+
+    if (!CreatePipe(&hStdoutRead, &hStdoutWrite, &sa, 0)) {
+        log_perror("EXEC: Couldn't create stdout pipe");
+        goto close_stdin;
+    }
+    /* Make stdout read end non-inheritable */
+    SetHandleInformation(hStdoutRead, HANDLE_FLAG_INHERIT, 0);
+
+    if (!CreatePipe(&hStderrRead, &hStderrWrite, &sa, 0)) {
+        log_perror("EXEC: Couldn't create stderr pipe");
+        goto close_stdout;
+    }
+    /* Make stderr read end non-inheritable */
+    SetHandleInformation(hStderrRead, HANDLE_FLAG_INHERIT, 0);
+
+    /* Build command line from args */
+    /* Windows needs a single command line string, not an array */
+    Stream *cmdline = new_stream(1024);
+
+    /* Check if this is a batch file - needs to run through cmd.exe */
+    size_t cmdlen = strlen(cmd);
+    int is_batch = (cmdlen > 4 &&
+                    (_stricmp(cmd + cmdlen - 4, ".bat") == 0 ||
+                     _stricmp(cmd + cmdlen - 4, ".cmd") == 0));
+
+    const char *actual_cmd = cmd;
+    if (is_batch) {
+        /* For batch files, we run: cmd.exe /c "batchfile arg1 arg2..."
+         * The entire command+args must be in one quoted string for cmd.exe
+         * Convert forward slashes to backslashes for cmd.exe */
+        actual_cmd = "cmd.exe";
+        stream_add_string(cmdline, "cmd.exe /c \"");
+        /* Add path with forward slashes converted to backslashes */
+        for (const char *p = cmd; *p; p++) {
+            if (*p == '/')
+                stream_add_char(cmdline, '\\');
+            else
+                stream_add_char(cmdline, *p);
+        }
+        /* Add the rest of the arguments inside the same quotes */
+        for (int i = 1; args[i] != NULL; i++) {
+            stream_add_char(cmdline, ' ');
+            stream_add_string(cmdline, args[i]);
+        }
+        stream_add_char(cmdline, '\"');
+    } else {
+        for (int i = 0; args[i] != NULL; i++) {
+            if (i > 0)
+                stream_add_char(cmdline, ' ');
+            /* Quote arguments that contain spaces */
+            if (strchr(args[i], ' ') != NULL) {
+                stream_add_char(cmdline, '"');
+                stream_add_string(cmdline, args[i]);
+                stream_add_char(cmdline, '"');
+            } else {
+                stream_add_string(cmdline, args[i]);
+            }
+        }
+    }
+
+    /* Build environment block (null-terminated strings, double-null at end) */
+    Stream *envblock = new_stream(1024);
+    for (int i = 0; env[i] != NULL; i++) {
+        stream_add_string(envblock, env[i]);
+        stream_add_char(envblock, '\0');
+    }
+    stream_add_char(envblock, '\0');  /* Double-null terminator */
+
+    /* Set up STARTUPINFO with redirected handles */
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.hStdInput = hStdinRead;
+    si.hStdOutput = hStdoutWrite;
+    si.hStdError = hStderrWrite;
+    si.dwFlags |= STARTF_USESTDHANDLES;
+
+    ZeroMemory(&pi, sizeof(pi));
+
+    /* CreateProcess */
+    /* For batch files, pass NULL as application name and let cmd.exe handle it */
+    success = CreateProcessA(
+        is_batch ? NULL : cmd,        /* Application name (NULL for batch files) */
+        stream_contents(cmdline),     /* Command line (mutable) */
+        NULL,                         /* Process security attributes */
+        NULL,                         /* Thread security attributes */
+        TRUE,                         /* Inherit handles */
+        0,                            /* Creation flags */
+        stream_contents(envblock),    /* Environment block */
+        NULL,                         /* Current directory */
+        &si,                          /* Startup info */
+        &pi                           /* Process information */
+    );
+
+    free_stream(cmdline);
+    free_stream(envblock);
+
+    if (!success) {
+        log_perror("EXEC: CreateProcess failed");
+        goto close_stderr;
+    }
+
+    /* Close thread handle (we don't need it) */
+    CloseHandle(pi.hThread);
+
+    /* Close the child's ends of the pipes */
+    CloseHandle(hStdinRead);
+    CloseHandle(hStdoutWrite);
+    CloseHandle(hStderrWrite);
+
+    /* Store handles in the task structure */
+    tw->hProcess = pi.hProcess;
+    tw->hStdoutRead = hStdoutRead;
+    tw->hStderrRead = hStderrRead;
+
+    /* Convert stdin write handle to file descriptor for write_all() */
+    *in = _open_osfhandle((intptr_t)hStdinWrite, 0);
+
+    /* These are not used on Windows - we read via handles in the thread */
+    *out = -1;
+    *err = -1;
+
+    /* Start reader thread */
+    tw->hReaderThread = CreateThread(NULL, 0, exec_reader_thread, tw, 0, NULL);
+    if (tw->hReaderThread == NULL) {
+        log_perror("EXEC: CreateThread failed");
+        CloseHandle(pi.hProcess);
+        goto fail;
+    }
+
+    return (pid_t)pi.dwProcessId;
+
+close_stderr:
+    CloseHandle(hStderrRead);
+    CloseHandle(hStderrWrite);
+
+close_stdout:
+    CloseHandle(hStdoutRead);
+    CloseHandle(hStdoutWrite);
+
+close_stdin:
+    CloseHandle(hStdinRead);
+    CloseHandle(hStdinWrite);
+
+fail:
+    return 0;
+}
+#else
 static pid_t
 fork_and_exec(const char *cmd, const char *const args[], const char *const env[],
               int *in, int *out, int *err)
@@ -272,10 +528,18 @@ close_in:
 fail:
     return 0;
 }
+#endif
 
 static int
 set_nonblocking(int fd)
 {
+#ifdef _WIN32
+    /* Windows: Use ioctlsocket for sockets, or just succeed for pipes */
+    /* Since we're using this with pipes from exec, just return success */
+    /* Pipe I/O on Windows is handled differently */
+    (void)fd;
+    return 1;
+#else
     int flags;
 
     if ((flags = fcntl(fd, F_GETFL, 0)) < 0
@@ -283,6 +547,7 @@ set_nonblocking(int fd)
         return 0;
     else
         return 1;
+#endif
 }
 
 static enum error
@@ -305,7 +570,11 @@ exec_waiter_suspender(vm the_vm, void *data)
         goto free_task_waiting_on_exec;
     }
 
+#ifdef _WIN32
+    if ((tw->pid = fork_and_exec(tw->cmd, tw->args, tw->env, &tw->fin, &tw->fout, &tw->ferr, tw)) == 0) {
+#else
     if ((tw->pid = fork_and_exec(tw->cmd, tw->args, tw->env, &tw->fin, &tw->fout, &tw->ferr)) == 0) {
+#endif
         error = E_EXEC;
         goto clear_process_slot;
     }
@@ -318,8 +587,10 @@ exec_waiter_suspender(vm the_vm, void *data)
     oklog("%s\n", reset_stream(logmsg));
 
     set_nonblocking(tw->fin);
+#ifndef _WIN32
     set_nonblocking(tw->fout);
     set_nonblocking(tw->ferr);
+#endif
 
     if (tw->in) {
         if (write_all(tw->fin, tw->in, tw->len) < 0) {
@@ -330,8 +601,11 @@ exec_waiter_suspender(vm the_vm, void *data)
 
     close(tw->fin);
 
+#ifndef _WIN32
+    /* On Windows, the reader thread handles stdout/stderr */
     network_register_fd(tw->fout, stdout_readable, nullptr, tw);
     network_register_fd(tw->ferr, stderr_readable, nullptr, tw);
+#endif
 
     tw->the_vm = the_vm;
 
@@ -389,6 +663,20 @@ bf_exec(Var arglist, Byte next, void *vdata, Objid progr)
         pack = make_raise_pack(E_INVARG, "Invalid path", var_ref(zero));
         goto free_arglist;
     }
+#ifdef _WIN32
+    /* Windows path checks: no absolute paths, no parent directory traversal */
+    if (('/' == cmd[0]) || ('\\' == cmd[0])
+            || (strlen(cmd) >= 2 && cmd[1] == ':')  /* Drive letter */
+            || (strlen(cmd) > 1 && '.' == cmd[0] && '.' == cmd[1])) {
+        pack = make_raise_pack(E_INVARG, "Invalid path", var_ref(zero));
+        goto free_arglist;
+    }
+    if (strstr(cmd, "/.") || strstr(cmd, "./")
+            || strstr(cmd, "\\.") || strstr(cmd, ".\\")) {
+        pack = make_raise_pack(E_INVARG, "Invalid path", var_ref(zero));
+        goto free_arglist;
+    }
+#else
     if (('/' == cmd[0])
             || (1 < strlen(cmd) && '.' == cmd[0] && '.' == cmd[1])) {
         pack = make_raise_pack(E_INVARG, "Invalid path", var_ref(zero));
@@ -398,6 +686,7 @@ bf_exec(Var arglist, Byte next, void *vdata, Objid progr)
         pack = make_raise_pack(E_INVARG, "Invalid path", var_ref(zero));
         goto free_arglist;
     }
+#endif
 
     /* Make sure any environment variables supplied are strings. */
     if (arglist.v.list[0].v.num >= 3) {
@@ -447,6 +736,52 @@ bf_exec(Var arglist, Byte next, void *vdata, Objid progr)
 
     /* stat the command */
     struct stat buf;
+#ifdef _WIN32
+    /* Windows: Try PATHEXT extensions FIRST (.BAT, .CMD, .EXE, etc.)
+     * because the base name might exist but not be executable on Windows */
+    bool found = false;
+    const char *pathext = getenv("PATHEXT");
+    if (!pathext)
+        pathext = ".COM;.EXE;.BAT;.CMD";  /* Default Windows PATHEXT */
+
+    /* Parse PATHEXT and try each extension */
+    char *pathext_copy = _strdup(pathext);
+    char *ext = pathext_copy;
+    char *ext_next;
+    Stream *try_path = new_stream(strlen(cmd) + 10);
+
+    while (ext && *ext && !found) {
+        ext_next = strchr(ext, ';');
+        if (ext_next)
+            *ext_next++ = '\0';
+
+        /* Skip empty extensions */
+        if (*ext) {
+            stream_add_string(try_path, cmd);
+            stream_add_string(try_path, ext);
+            const char *try_cmd = reset_stream(try_path);
+            if (stat(try_cmd, &buf) == 0 && S_ISREG(buf.st_mode)) {
+                /* Found it - update cmd to include the extension */
+                free_str(cmd);
+                cmd = str_dup(try_cmd);
+                found = true;
+            }
+        }
+        ext = ext_next;
+    }
+    free_stream(try_path);
+    free(pathext_copy);
+
+    /* If no extension found, try the exact name (for .exe files specified with extension) */
+    if (!found && stat(cmd, &buf) == 0 && S_ISREG(buf.st_mode)) {
+        found = true;
+    }
+
+    if (!found) {
+        pack = make_raise_pack(E_INVARG, "Does not exist", var_ref(zero));
+        goto free_in;
+    }
+#else
     if (stat(cmd, &buf) != 0) {
         pack = make_raise_pack(E_INVARG, "Does not exist", var_ref(zero));
         goto free_in;
@@ -455,6 +790,7 @@ bf_exec(Var arglist, Byte next, void *vdata, Objid progr)
         pack = make_raise_pack(E_INVARG, "Is not a file", var_ref(zero));
         goto free_in;
     }
+#endif
 
     args = (const char **)mymalloc(sizeof(const char *) * i, M_ARRAY);
     FOR_EACH(v, arglist.v.list[1], i, c)
@@ -465,7 +801,21 @@ bf_exec(Var arglist, Byte next, void *vdata, Objid progr)
     /* setup the environment variables */
     // Add two to the args so we're guaranteed to always have env[0] for PATH and env[$] for null
     env = (const char **)mymalloc(sizeof(const char *) * ((listlength(arglist) >= 3 ? listlength(arglist.v.list[3]) : 0) + 2), M_ARRAY);
+#ifdef _WIN32
+    /* On Windows, inherit system PATH or use a reasonable default */
+    const char *syspath = getenv("PATH");
+    if (syspath) {
+        Stream *pathstream = new_stream(strlen(syspath) + 6);
+        stream_add_string(pathstream, "PATH=");
+        stream_add_string(pathstream, syspath);
+        env[0] = str_dup(reset_stream(pathstream));
+        free_stream(pathstream);
+    } else {
+        env[0] = str_dup("PATH=C:\\Windows\\System32;C:\\Windows");
+    }
+#else
     env[0] = str_dup("PATH=/bin:/usr/bin");
+#endif
     if (listlength(arglist) >= 3) {
         FOR_EACH(v, arglist.v.list[3], i, c)
         env[i] = str_dup(v.v.str);
@@ -556,10 +906,15 @@ deal_with_child_exit(void)
             v = new_list(3);
             v.v.list[1].type = TYPE_INT;
             v.v.list[1].v.num = tw->code;
+#ifndef _WIN32
+            /* On Unix, drain any remaining output from the pipes */
             stdout_readable(tw->fout, tw);
+#endif
             v.v.list[2].type = TYPE_STR;
             v.v.list[2].v.str = str_dup(reset_stream(tw->sout));
+#ifndef _WIN32
             stderr_readable(tw->ferr, tw);
+#endif
             v.v.list[3].type = TYPE_STR;
             v.v.list[3].v.str = str_dup(reset_stream(tw->serr));
 
@@ -577,8 +932,14 @@ deal_with_child_exit(void)
 void
 register_exec(void)
 {
+#ifdef _WIN32
+    /* Initialize critical section for process table protection */
+    InitializeCriticalSection(&exec_cs);
+    exec_cs_initialized = 1;
+#else
     sigemptyset(&block_sigchld);
     sigaddset(&block_sigchld, SIGCHLD);
+#endif
 
     register_task_queue(exec_waiter_enumerator);
     register_function("exec", 1, 3, bf_exec, TYPE_LIST, TYPE_STR, TYPE_LIST);

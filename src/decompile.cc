@@ -673,7 +673,7 @@ finish_indexed_assignment:
                         if (ptr != bc.vector + done)
                             panic_moo("CATCH ends in wrong place in DECOMPILE!");
                         e = alloc_expr(EXPR_CATCH);
-                        e->e._catch._try = try_expr;
+                        e->e._catch.try_expr = try_expr;
                         e->e._catch.codes = a;
                         e->e._catch.except = default_expr;
                         push_expr((Expr *)HOT3(is_hot || (default_expr

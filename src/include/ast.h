@@ -83,7 +83,7 @@ struct Expr_Cond {
 };
 
 struct Expr_Catch {
-    Expr *_try;
+    Expr *try_expr;  /* Renamed from _try - _try is reserved in MSVC */
     Arg_List *codes;
     Expr *except;
 };
