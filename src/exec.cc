@@ -78,6 +78,7 @@ typedef enum {
 
 typedef struct task_waiting_on_exec {
     const char *cmd;
+    const char *display_cmd;   /* Original path for queued_tasks() display (without Windows extension) */
     const char **args;
     const char *in;
     const char **env;
@@ -123,6 +124,7 @@ malloc_task_waiting_on_exec()
     task_waiting_on_exec *tw =
         (task_waiting_on_exec *)mymalloc(sizeof(task_waiting_on_exec), M_TASK);
     tw->cmd = nullptr;
+    tw->display_cmd = nullptr;
     tw->args = nullptr;
     tw->in = nullptr;
     tw->env = nullptr;
@@ -140,6 +142,8 @@ free_task_waiting_on_exec(task_waiting_on_exec * tw)
 
     if (tw->cmd)
         free_str(tw->cmd);
+    if (tw->display_cmd)
+        free_str(tw->display_cmd);
     if (tw->args) {
         for (i = 0; tw->args[i]; i++)
             free_str(tw->args[i]);
@@ -187,7 +191,7 @@ exec_waiter_enumerator(task_closure closure, void *data)
         if (process_table[i]) {
             if (TWS_KILL != process_table[i]->status) {
                 action = (*closure) (process_table[i]->the_vm,
-                                     process_table[i]->cmd,
+                                     process_table[i]->display_cmd,
                                      data);
                 if (TEA_KILL == action)
                     process_table[i]->status = TWS_KILL;
@@ -240,6 +244,24 @@ stderr_readable(int fd, void *data)
 
 #ifdef _WIN32
 /*
+ * Normalize CRLF to LF in a buffer.
+ * Returns the new length after removing CR characters that precede LF.
+ */
+static DWORD
+normalize_crlf(char *buffer, DWORD len)
+{
+    DWORD j = 0;
+    for (DWORD i = 0; i < len; i++) {
+        /* Skip CR when followed by LF */
+        if (buffer[i] == '\r' && i + 1 < len && buffer[i + 1] == '\n') {
+            continue;
+        }
+        buffer[j++] = buffer[i];
+    }
+    return j;
+}
+
+/*
  * Windows process reader thread.
  * Reads stdout/stderr, waits for process exit, then signals completion.
  */
@@ -253,15 +275,17 @@ exec_reader_thread(LPVOID lpParam)
 
     /* Read stdout until EOF */
     while (ReadFile(tw->hStdoutRead, buffer, sizeof(buffer), &bytesRead, NULL) && bytesRead > 0) {
+        DWORD normalized_len = normalize_crlf(buffer, bytesRead);
         EnterCriticalSection(&exec_cs);
-        stream_add_string(tw->sout, raw_bytes_to_binary(buffer, bytesRead));
+        stream_add_string(tw->sout, raw_bytes_to_binary(buffer, normalized_len));
         LeaveCriticalSection(&exec_cs);
     }
 
     /* Read stderr until EOF */
     while (ReadFile(tw->hStderrRead, buffer, sizeof(buffer), &bytesRead, NULL) && bytesRead > 0) {
+        DWORD normalized_len = normalize_crlf(buffer, bytesRead);
         EnterCriticalSection(&exec_cs);
-        stream_add_string(tw->serr, raw_bytes_to_binary(buffer, bytesRead));
+        stream_add_string(tw->serr, raw_bytes_to_binary(buffer, normalized_len));
         LeaveCriticalSection(&exec_cs);
     }
 
@@ -737,6 +761,10 @@ bf_exec(Var arglist, Byte next, void *vdata, Objid progr)
     /* stat the command */
     struct stat buf;
 #ifdef _WIN32
+    /* Save the original command path for display in queued_tasks() before
+     * we potentially modify it by adding a Windows executable extension */
+    const char *display_cmd = str_dup(cmd);
+
     /* Windows: Try PATHEXT extensions FIRST (.BAT, .CMD, .EXE, etc.)
      * because the base name might exist but not be executable on Windows */
     bool found = false;
@@ -778,6 +806,7 @@ bf_exec(Var arglist, Byte next, void *vdata, Objid progr)
     }
 
     if (!found) {
+        free_str(display_cmd);
         pack = make_raise_pack(E_INVARG, "Does not exist", var_ref(zero));
         goto free_in;
     }
@@ -826,6 +855,11 @@ bf_exec(Var arglist, Byte next, void *vdata, Objid progr)
 
     tw = malloc_task_waiting_on_exec();
     tw->cmd = cmd;
+#ifdef _WIN32
+    tw->display_cmd = display_cmd;
+#else
+    tw->display_cmd = str_dup(cmd);
+#endif
     tw->args = args;
     tw->in = in;
     tw->len = len;

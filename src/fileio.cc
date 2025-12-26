@@ -309,11 +309,15 @@ static const char *file_modestr_to_mode(const char *s, file_type *type, file_mod
     }
 
     if (s[2] == 't')            t = file_type_text;
-    else if (s[2] == 'b') {
-        t = file_type_binary;
-        buffer[p++] = 'b';
-    } else
+    else if (s[2] == 'b')       t = file_type_binary;
+    else
         return nullptr;
+
+    /* Always use binary mode for fopen to ensure consistent behavior.
+     * On Windows, text mode does CRLF translation which breaks cross-platform
+     * compatibility. MOO's text/binary distinction is handled separately
+     * through the in_filter/out_filter callbacks. */
+    buffer[p++] = 'b';
 
     if (s[3] == 'f')            m |= FILE_O_FLUSH;
     else if (s[3] != 'n')
