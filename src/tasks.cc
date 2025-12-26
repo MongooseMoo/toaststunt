@@ -19,6 +19,7 @@
 #include <math.h>
 #include <string.h>
 #include <time.h>
+#include <climits>
 
 #ifdef _WIN32
 #include "platform.h"
@@ -1309,7 +1310,10 @@ enqueue_suspended_task(vm the_vm, void *data)
 
         when = double_to_start_tv(after_seconds);
     } else {
-        when.tv_sec = INTNUM_MAX;
+        /* Use LONG_MAX because tv_sec is 'long' on all platforms.
+         * INTNUM_MAX is INT64_MAX on 64-bit builds, but Windows' long is 32-bit
+         * even on 64-bit, causing overflow and immediate task completion. */
+        when.tv_sec = LONG_MAX;
         when.tv_usec = 0;
     }
 
