@@ -936,12 +936,23 @@ make_listener(Var desc, int *fd, const char **name, const char **ip_address,
             continue;
         }
 
+#ifdef _WIN32
+        // On Windows, SO_REUSEADDR allows multiple processes to bind to the same port,
+        // which is a security issue. Use SO_EXCLUSIVEADDRUSE to prevent port hijacking.
+        if (setsockopt(s, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char*)&yes, sizeof(int)) < 0) {
+            log_perror("Error setting listening socket exclusiveaddruse");
+            SOCKET_CLOSE(s);
+            freeaddrinfo(servinfo);
+            return E_QUOTA;
+        }
+#else
         if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(int)) < 0) {
             log_perror("Error setting listening socket reuseaddr");
             SOCKET_CLOSE(s);
             freeaddrinfo(servinfo);
             return E_QUOTA;
         }
+#endif
 
         if (use_ipv6 && setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, (const char*)&yes, sizeof yes) < 0) {
             log_perror("Error disabling listening socket dual-stack mode for IPv6");
