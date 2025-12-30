@@ -3,6 +3,25 @@
 #ifdef SQLITE3_FOUND
 
 #include <unordered_map>
+#include <cstdio>
+#include <cstdarg>
+
+#ifdef _WIN32
+// Windows doesn't have asprintf, provide a simple implementation
+static int asprintf(char **strp, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    int len = _vscprintf(fmt, args);
+    va_end(args);
+    if (len < 0) return -1;
+    *strp = (char *)malloc(len + 1);
+    if (!*strp) return -1;
+    va_start(args, fmt);
+    int ret = vsprintf(*strp, fmt, args);
+    va_end(args);
+    return ret;
+}
+#endif
 
 #include "sqlite.h"
 #include "background.h"

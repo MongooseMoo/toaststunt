@@ -6,6 +6,8 @@
 #include <unordered_map>
 #include <limits.h>
 #include <string>
+#include <mutex>
+#include <vector>
 
 #include "pcre_moo.h"
 #include "functions.h"
@@ -30,16 +32,15 @@ struct std::hash<cache_type>
     }
 };
 
-struct CacheEqual : public std::binary_function<const cache_type&, const cache_type&, bool>
+struct CacheEqual
 {
-public:
     bool operator() (const cache_type& c1, const cache_type& c2) const
     {
         return strcmp(c1.first, c2.first) == 0 && c1.second == c2.second;
     }
 };
 
-static pthread_mutex_t cache_mutex;
+static std::recursive_mutex cache_mutex;
 typedef std::pair<const char*, unsigned char> cache_type;
 static std::unordered_map<cache_type, pcre_cache_entry*, std::hash<cache_type>, CacheEqual> pcre_pattern_cache;
 
@@ -48,7 +49,7 @@ get_pcre(const char *string, unsigned char options)
 {
     pcre_cache_entry *entry = nullptr;
 
-    pthread_mutex_lock(&cache_mutex);
+    std::lock_guard<std::recursive_mutex> lock(cache_mutex);
     cache_type pair = std::make_pair(string, options);
     if (pcre_pattern_cache.count(pair) != 0) {
         entry = pcre_pattern_cache[pair];
@@ -106,7 +107,6 @@ get_pcre(const char *string, unsigned char options)
         }
     }
 
-    pthread_mutex_unlock(&cache_mutex);
     return entry;
 }
 
@@ -150,7 +150,7 @@ bf_pcre_match(Var arglist, Byte next, void *vdata, Objid progr)
 
     /* Determine how many subpatterns match so we can allocate memory. */
     int oveccount = (entry->captures + 1) * 3;
-    int ovector[oveccount];
+    std::vector<int> ovector(oveccount);
 
     /* Set up the MOO variables to store the final value and intermediaries. */
     Var named_groups = new_map();
@@ -174,7 +174,7 @@ bf_pcre_match(Var arglist, Byte next, void *vdata, Objid progr)
     while (offset < subject_length)
     {
         loops++;
-        rc = pcre_exec(entry->re, entry->extra, subject, subject_length, offset, 0, ovector, oveccount);
+        rc = pcre_exec(entry->re, entry->extra, subject, subject_length, offset, 0, ovector.data(), oveccount);
         if (rc < 0 && rc != PCRE_ERROR_NOMATCH)
         {
             /* We've encountered some funky error. Back out and let them know what it is. */
@@ -222,7 +222,7 @@ bf_pcre_match(Var arglist, Byte next, void *vdata, Objid progr)
                     /* Determine which result number corresponds to the named capture group */
                     int n = (tabptr[0] << 8) | tabptr[1];
                     /* Create a list of indices for the substring */
-                    Var pos = result_indices(ovector, n);
+                    Var pos = result_indices(ovector.data(), n);
                     Var result = new_map();
                     int substring_size = ovector[2 * n + 1] - ovector[2 * n];
                     result = mapinsert(result, var_ref(position), pos);
@@ -247,8 +247,8 @@ bf_pcre_match(Var arglist, Byte next, void *vdata, Objid progr)
                 if (bit_is_true(bit_array, i))
                     continue;
 
-                pcre_get_substring(subject, ovector, rc, i, &(matched_substring));
-                Var pos = result_indices(ovector, i);
+                pcre_get_substring(subject, ovector.data(), rc, i, &(matched_substring));
+                Var pos = result_indices(ovector.data(), i);
 
                 Var result = new_map();
                 result = mapinsert(result, var_ref(position), pos);
@@ -306,13 +306,12 @@ static void free_entry(pcre_cache_entry *entry)
 static void delete_cache_entry(const char *pattern, unsigned char options)
 {
     cache_type pair = std::make_pair(pattern, options);
-    pthread_mutex_lock(&cache_mutex);
+    std::lock_guard<std::recursive_mutex> lock(cache_mutex);
     auto it = pcre_pattern_cache.find(pair);
     auto entry = *it;
     pcre_pattern_cache.erase(it);
     free_str(entry.first.first);
     free_entry(entry.second);
-    pthread_mutex_unlock(&cache_mutex);
 }
 
 /* Create a two element list with the substring indices. */
@@ -407,7 +406,7 @@ pcre_shutdown(void)
     }
 
     pcre_pattern_cache.clear();
-    pthread_mutex_destroy(&cache_mutex);
+    // std::recursive_mutex destructor handles cleanup automatically
 }
 
 #ifdef SQLITE3_FOUND
@@ -454,14 +453,7 @@ register_pcre() {
     register_function("pcre_match", 2, 4, bf_pcre_match, TYPE_STR, TYPE_STR, TYPE_INT, TYPE_INT);
     register_function("pcre_replace", 2, 2, bf_pcre_replace, TYPE_STR, TYPE_STR);
     register_function("pcre_cache_stats", 0, 0, bf_pcre_cache_stats);
-
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-
-    pthread_mutex_init(&cache_mutex, &attr);
-
-    pthread_mutexattr_destroy(&attr);
+    // std::recursive_mutex is initialized automatically
 }
 
 #else /* PCRE_FOUND */
