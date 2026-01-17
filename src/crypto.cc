@@ -58,10 +58,10 @@ static int algorithms = 0;
 #define SHA512 (1<<3)
 #define BCRYPT (1<<4)
 
-#define HAS_MD5    (algorithms | MD5)
-#define HAS_SHA256 (algorithms | SHA256)
-#define HAS_SHA512 (algorithms | SHA512)
-#define HAS_BCRYPT (algorithms | BCRYPT)
+#define HAS_MD5    (algorithms & MD5)
+#define HAS_SHA256 (algorithms & SHA256)
+#define HAS_SHA512 (algorithms & SHA512)
+#define HAS_BCRYPT (algorithms & BCRYPT)
 
 extern "C" {
 
@@ -707,14 +707,14 @@ register_crypto(void)
 #ifndef _WIN32
     /* Unix crypt() may support MD5, SHA256, SHA512 depending on system */
     if (!strncmp("$1$", crypt("password", "$1$"), 3))
-        algorithms = HAS_MD5;
+        algorithms |= MD5;
     if (!strncmp("$5$", crypt("password", "$5$"), 3))
-        algorithms = HAS_SHA256;
+        algorithms |= SHA256;
     if (!strncmp("$6$", crypt("password", "$6$"), 3))
-        algorithms = HAS_SHA512;
+        algorithms |= SHA512;
 #endif
     /* BCRYPT is always available via bundled crypt_blowfish */
-    algorithms = HAS_BCRYPT;
+    algorithms |= BCRYPT;
 
     register_function("salt", 2, 2, bf_salt, TYPE_STR, TYPE_STR);
     register_function("crypt", 1, 2, bf_crypt, TYPE_STR, TYPE_STR);
