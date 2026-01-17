@@ -49,6 +49,10 @@
 #include "storage.h"
 #include "utils.h"
 
+#ifdef _WIN32
+#include "dependencies/crypt/crypt_des.h"
+#endif
+
 /* supported algorithms */
 
 static int algorithms = 0;
@@ -368,7 +372,7 @@ bf_crypt(Var arglist, Byte next, void *vdata, Objid progr)
     }
     else {
 #ifdef _WIN32
-        /* Windows doesn't have Unix crypt() - use our portable SHA implementations */
+        /* Windows doesn't have Unix crypt() - use our portable implementations */
         char output[128];
         char *ret = nullptr;
 
@@ -376,6 +380,10 @@ bf_crypt(Var arglist, Byte next, void *vdata, Objid progr)
             ret = _crypt_sha256_rn(arglist.v.list[1].v.str, salt, output, sizeof(output));
         } else if (SHA512 == format) {
             ret = _crypt_sha512_rn(arglist.v.list[1].v.str, salt, output, sizeof(output));
+        } else {
+            /* Traditional DES crypt - 2 char salt, no prefix */
+            static struct crypt_des_data des_data = {0};
+            ret = _crypt_des_r((const unsigned char *)arglist.v.list[1].v.str, salt, &des_data);
         }
 
         if (ret) {
@@ -383,7 +391,7 @@ bf_crypt(Var arglist, Byte next, void *vdata, Objid progr)
             r.v.str = str_dup(ret);
         } else {
             free_var(arglist);
-            return make_raise_pack(E_INVARG, "Unsupported crypt format on Windows (only $2a$, $5$, $6$ supported)", zero);
+            return make_raise_pack(E_INVARG, "Invalid salt for crypt()", zero);
         }
 #else
         r.type = TYPE_STR;
@@ -723,7 +731,8 @@ void
 register_crypto(void)
 {
 #ifdef _WIN32
-    /* Windows: SHA256 and SHA512 are available via our portable implementation */
+    /* Windows: SHA256, SHA512, and DES are available via our portable implementations */
+    _crypt_des_init();
     algorithms = SHA256 | SHA512 | BCRYPT;
 #else
     /* Unix crypt() may support MD5, SHA256, SHA512 depending on system */
