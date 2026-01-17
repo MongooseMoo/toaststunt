@@ -81,6 +81,10 @@ extern "C" {
             char *, int);
     extern char *_crypt_blowfish_rn(const char *, const char *,
                                     char *, int);
+    extern char *_crypt_sha256_rn(const char *, const char *,
+                                  char *, int);
+    extern char *_crypt_sha512_rn(const char *, const char *,
+                                  char *, int);
 }
 
 /* Parse a salt prefix.  Identify the format, the count (AKA rounds or
@@ -364,9 +368,23 @@ bf_crypt(Var arglist, Byte next, void *vdata, Objid progr)
     }
     else {
 #ifdef _WIN32
-        /* Windows doesn't have Unix crypt() - only BCRYPT is available */
-        free_var(arglist);
-        return make_raise_pack(E_INVARG, "Only bcrypt ($2a$/$2b$) salts are supported on Windows", zero);
+        /* Windows doesn't have Unix crypt() - use our portable SHA implementations */
+        char output[128];
+        char *ret = nullptr;
+
+        if (SHA256 == format) {
+            ret = _crypt_sha256_rn(arglist.v.list[1].v.str, salt, output, sizeof(output));
+        } else if (SHA512 == format) {
+            ret = _crypt_sha512_rn(arglist.v.list[1].v.str, salt, output, sizeof(output));
+        }
+
+        if (ret) {
+            r.type = TYPE_STR;
+            r.v.str = str_dup(ret);
+        } else {
+            free_var(arglist);
+            return make_raise_pack(E_INVARG, "Unsupported crypt format on Windows (only $2a$, $5$, $6$ supported)", zero);
+        }
 #else
         r.type = TYPE_STR;
         r.v.str = str_dup(crypt(arglist.v.list[1].v.str, salt));
@@ -704,7 +722,10 @@ bf_value_hmac(Var arglist, Byte next, void *vdata, Objid progr)
 void
 register_crypto(void)
 {
-#ifndef _WIN32
+#ifdef _WIN32
+    /* Windows: SHA256 and SHA512 are available via our portable implementation */
+    algorithms = SHA256 | SHA512 | BCRYPT;
+#else
     /* Unix crypt() may support MD5, SHA256, SHA512 depending on system */
     if (!strncmp("$1$", crypt("password", "$1$"), 3))
         algorithms |= MD5;
@@ -712,9 +733,9 @@ register_crypto(void)
         algorithms |= SHA256;
     if (!strncmp("$6$", crypt("password", "$6$"), 3))
         algorithms |= SHA512;
-#endif
     /* BCRYPT is always available via bundled crypt_blowfish */
     algorithms |= BCRYPT;
+#endif
 
     register_function("salt", 2, 2, bf_salt, TYPE_STR, TYPE_STR);
     register_function("crypt", 1, 2, bf_crypt, TYPE_STR, TYPE_STR);
