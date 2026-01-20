@@ -1,15 +1,31 @@
 # ToastStunt ChangeLog
-## 2.7.3 (In Progress)
+## 2.8.0 (In progress)
+### Bug Fixes
+- Temporarily reenable the emptylist bandaid until we can find the culprit.
+
+### New Features
+- Add an optional unclean_shutdown parameter to `shutdown()`, which replicates the functionality found in the `panic()` builtin.
+- Remove the `panic()` builtin.
+
+## 2.7.3 (Jun 20, 2025)
 ### Bug Fixes
 - `listeners()` now uses the correct key for print-messages.
 - Threaded DNS lookups had an issue that made them freeze the server just as badly as non-threaded DNS lookups. This has been resolved. (See ToastCore for an example implementation of handling slow lookups without allowing a connection to process commands.)
 - `curl` and related functions are now disabled when outbound network connections are disabled.
 - Large amounts of input on TLS connections could cause it to fail to go through until the next command. This is now fixed.
+- Fixed waif crashes when indexing nested maps containing waifs.
+- Fixed telnet IAC IAC sequences not being properly handled.
+- PCRE now properly uses JIT compilation when available.
+- Enable support for the Dictionary Server (DICT) protocol when using curl.
 
 ### New Features
 - `open_network_connection` now displays more helpful error messages in-MOO, particularly when catching errors in a try.
 - Outbound TLS connections now include the SNI.
 - PCRE improvements.
+- Added state machine for telnet protocol handling to improve reliability.
+- Extend `mapdelete()` to accept a list of keys to delete. When passed a list as the second argument, mapdelete() will now delete multiple keys from the map in a single operation. If any key in the list is not found, a descriptive error is raised showing which key was missing.
+- Thread `occupants()` and improve performance when validating large lists of objects. **WARNING**: As with all other threaded functions, using occupants() in situations where it may be called many times, such as in loops, will implicitly suspend the verb akin to how reading input is handled. This may not be what you want! If this is undesirable, use `set_thread_mode(0)` prior to the function call in your verb.
+- Removed `clear_ancestor_cache()` builtin.
 
 ## 2.7.2 (Jul 17, 2024)
 ### Bug Fixes
