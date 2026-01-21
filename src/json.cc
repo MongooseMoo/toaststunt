@@ -114,6 +114,7 @@ struct parse_context {
     struct stack_item *top;
     mode_type mode;
     int depth;
+    const char *cancel_reason;
 };
 
 struct generate_context {
@@ -242,6 +243,7 @@ handle_number(void *ctx, const char *numberVal, unsigned int numberLen, yajl_tok
         return 1;
     }
 
+    pctx->cancel_reason = "Number out of representable range";
     return 0;
 }
 
@@ -319,8 +321,10 @@ handle_start_map(void *ctx)
 {
     struct parse_context *pctx = (struct parse_context *)ctx;
 
-    if (pctx->depth >= server_int_option("json_max_parse_depth", JSON_MAX_PARSE_DEPTH))
+    if (pctx->depth >= server_int_option("json_max_parse_depth", JSON_MAX_PARSE_DEPTH)) {
+        pctx->cancel_reason = "JSON nesting depth exceeded";
         return 0;
+    }
 
     Var k, v;
     k.type = (var_type)MAP_SENTINEL;
@@ -352,8 +356,10 @@ handle_start_array(void *ctx)
 {
     struct parse_context *pctx = (struct parse_context *)ctx;
 
-    if (pctx->depth >= server_int_option("json_max_parse_depth", JSON_MAX_PARSE_DEPTH))
+    if (pctx->depth >= server_int_option("json_max_parse_depth", JSON_MAX_PARSE_DEPTH)) {
+        pctx->cancel_reason = "JSON nesting depth exceeded";
         return 0;
+    }
 
     Var v;
     v.type = (var_type)ARRAY_SENTINEL;
@@ -537,6 +543,7 @@ bf_parse_json(Var arglist, Byte next, void *vdata, Objid progr)
     pctx.stack.v.v.num = 0;
     pctx.mode = MODE_COMMON_SUBSET;
     pctx.depth = 0;
+    pctx.cancel_reason = nullptr;
 
     const char *str = arglist.v.list[1].v.str;
     size_t len = strlen(str);
@@ -576,7 +583,18 @@ bf_parse_json(Var arglist, Byte next, void *vdata, Objid progr)
                     Var v = POP(pctx.top);
                     free_var(v);
                 }
-                pack = make_error_pack(E_INVARG);
+
+                if (pctx.cancel_reason != nullptr) {
+                    // Application-level rejection (depth limit, number overflow)
+                    pack = make_raise_pack(E_INVARG, pctx.cancel_reason, var_ref(zero));
+                } else {
+                    // YAJL syntax error - get detailed message with arrow
+                    unsigned char *yajl_err = yajl_get_error(hand, 1,
+                        (const unsigned char *)arglist.v.list[1].v.str,
+                        strlen(arglist.v.list[1].v.str));
+                    pack = make_raise_pack(E_INVARG, (const char *)yajl_err, var_ref(zero));
+                    yajl_free_error(hand, yajl_err);
+                }
             } else {
                 Var v = POP(pctx.top);
                 pack = make_var_pack(v);
