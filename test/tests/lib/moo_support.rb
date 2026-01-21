@@ -142,6 +142,13 @@ module MooSupport
     simplify(command(%Q|; return #{wrapped};|))
   end
 
+  # Captures full error info: {error_code, message, value, traceback}
+  # Use MOO's try/except to catch the raised error
+  def capture_error_info(expression)
+    result = command %Q|; try return #{expression}; except e (ANY) return e; endtry|
+    simplify(result)
+  end
+
   ## Support
 
   def nothing

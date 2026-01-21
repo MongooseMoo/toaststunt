@@ -370,6 +370,34 @@ class TestJson < Test::Unit::TestCase
     end
   end
 
+  def test_that_parse_json_returns_detailed_syntax_error
+    run_test_as('wizard') do
+      info = capture_error_info('parse_json("[1, 2, ]")')
+      assert_equal E_INVARG, info[0]
+      assert info[1].is_a?(String), "Error message should be a string"
+      assert info[1].length > 10, "Error message should be meaningful"
+      # YAJL errors look like: "parse error: after array element, I expect..."
+    end
+  end
+
+  def test_that_parse_json_returns_byte_offset_in_error_value
+    run_test_as('wizard') do
+      info = capture_error_info('parse_json("[1, 2, ]")')
+      assert_equal E_INVARG, info[0]
+      assert info[2].is_a?(Integer), "Error value should be byte offset"
+      assert info[2] >= 0
+    end
+  end
+
+  def test_that_parse_json_error_for_invalid_json_includes_position
+    run_test_as('wizard') do
+      info = capture_error_info('parse_json("{\\\"a\\\": }")')
+      assert_equal E_INVARG, info[0]
+      # Verbose YAJL errors include the problematic text
+      assert info[1].include?('{') || info[1].include?('parse error')
+    end
+  end
+
   def generate_json(value, mode = nil)
     if mode.nil?
       simplify command %Q|; return generate_json(#{value_ref(value)});|
