@@ -265,6 +265,22 @@ class TestJson < Test::Unit::TestCase
       assert_equal "{\"foo\":\"bar~zzbaz\"}", generate_json({"foo" => "bar~zzbaz"})
       assert_equal "{\"foo\":\"bar~f\"}", generate_json({"foo" => "bar~f"})
       assert_equal "{\"foo\":\"bar~\"}", generate_json({"foo" => "bar~"})
+      assert_equal "{\"foo\":\"Hoodie (~1.5k)\"}", generate_json({"foo" => "Hoodie (~1.5k)"})
+      assert_equal "{\"foo\":\"~0.5\"}", generate_json({"foo" => "~0.5"})
+    end
+  end
+
+  def test_that_generate_json_can_disable_binary_string_processing
+    run_test_as('wizard') do
+      # With binary processing disabled, ~0X and ~1X should pass through unchanged
+      assert_equal "{\"foo\":\"bar~08baz\"}", generate_json({"foo" => "bar~08baz"}, "common-subset", 1)
+      assert_equal "{\"foo\":\"bar~0Cbaz\"}", generate_json({"foo" => "bar~0Cbaz"}, "common-subset", 1)
+      assert_equal "{\"foo\":\"bar~0Abaz\"}", generate_json({"foo" => "bar~0Abaz"}, "common-subset", 1)
+      assert_equal "{\"foo\":\"bar~0Dbaz\"}", generate_json({"foo" => "bar~0Dbaz"}, "common-subset", 1)
+
+      # Default behavior (binary processing enabled) should still work
+      assert_equal "{\"foo\":\"bar\\bbaz\"}", generate_json({"foo" => "bar~08baz"}, "common-subset", 0)
+      assert_equal "{\"foo\":\"bar\\bbaz\"}", generate_json({"foo" => "bar~08baz"})
     end
   end
 
@@ -322,6 +338,8 @@ class TestJson < Test::Unit::TestCase
       assert(simplify(command(%Q|; x = ["foo" -> "bar~0Abaz"]; return x == parse_json(generate_json(x)); |)))
       assert(simplify(command(%Q|; x = ["foo" -> "bar~0Dbaz"]; return x == parse_json(generate_json(x)); |)))
       assert(simplify(command(%Q|; x = ["foo" -> "bar~09baz"]; return x == parse_json(generate_json(x)); |)))
+      assert(simplify(command(%Q|; x = ["foo" -> "Hoodie (~1.5k)"]; return x == parse_json(generate_json(x)); |)))
+      assert(simplify(command(%Q|; x = ["foo" -> "~0.5"]; return x == parse_json(generate_json(x)); |)))
 
       assert(simplify(command(%q|; x = "{\\"foo\\": \\"bar\\\\\\"baz\\"}"; return x == generate_json(parse_json(x)); |)))
       assert(simplify(command(%q|; x = "{\\"foo\\": \\"bar\\\\\\\baz\\"}"; return x == generate_json(parse_json(x)); |)))
@@ -398,11 +416,13 @@ class TestJson < Test::Unit::TestCase
     end
   end
 
-  def generate_json(value, mode = nil)
+  def generate_json(value, mode = nil, disable_binary = nil)
     if mode.nil?
       simplify command %Q|; return generate_json(#{value_ref(value)});|
-    else
+    elsif disable_binary.nil?
       simplify command %Q|; return generate_json(#{value_ref(value)}, #{value_ref(mode)});|
+    else
+      simplify command %Q|; return generate_json(#{value_ref(value)}, #{value_ref(mode)}, #{value_ref(disable_binary)});|
     end
   end
 
