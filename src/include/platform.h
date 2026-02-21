@@ -151,7 +151,8 @@ static inline int gettimeofday(struct timeval *tv, void *tz)
     return 0;
 }
 
-/* clock_gettime replacement */
+/* clock_gettime replacement - MinGW provides its own via pthread */
+#ifndef CLOCK_REALTIME
 #define CLOCK_REALTIME 0
 #define CLOCK_MONOTONIC 1
 #define CLOCK_MONOTONIC_RAW 2  /* same as CLOCK_MONOTONIC on Windows */
@@ -168,6 +169,7 @@ static inline int clock_gettime(clockid_t clk_id, struct timespec *tp)
     tp->tv_nsec = (long)(((count.QuadPart % freq.QuadPart) * 1000000000LL) / freq.QuadPart);
     return 0;
 }
+#endif /* CLOCK_REALTIME */
 
 /* timeradd/timersub macros - not available on Windows */
 #ifndef timeradd
