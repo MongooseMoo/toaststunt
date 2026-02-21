@@ -661,6 +661,7 @@ bf_exec(Var arglist, Byte next, void *vdata, Objid progr)
     const char **env = nullptr;
     task_waiting_on_exec *tw = nullptr;
     const char *in = nullptr;
+    const char *display_cmd = nullptr;
     int len;
 
     /* The first argument must be a list of strings.  The first string
@@ -761,9 +762,10 @@ bf_exec(Var arglist, Byte next, void *vdata, Objid progr)
     /* stat the command */
     struct stat buf;
 #ifdef _WIN32
+    {
     /* Save the original command path for display in queued_tasks() before
      * we potentially modify it by adding a Windows executable extension */
-    const char *display_cmd = str_dup(cmd);
+    display_cmd = str_dup(cmd);
 
     /* Windows: Try PATHEXT extensions FIRST (.BAT, .CMD, .EXE, etc.)
      * because the base name might exist but not be executable on Windows */
@@ -810,6 +812,7 @@ bf_exec(Var arglist, Byte next, void *vdata, Objid progr)
         pack = make_raise_pack(E_INVARG, "Does not exist", var_ref(zero));
         goto free_in;
     }
+    }
 #else
     if (stat(cmd, &buf) != 0) {
         pack = make_raise_pack(E_INVARG, "Does not exist", var_ref(zero));
@@ -831,6 +834,7 @@ bf_exec(Var arglist, Byte next, void *vdata, Objid progr)
     // Add two to the args so we're guaranteed to always have env[0] for PATH and env[$] for null
     env = (const char **)mymalloc(sizeof(const char *) * ((listlength(arglist) >= 3 ? listlength(arglist.v.list[3]) : 0) + 2), M_ARRAY);
 #ifdef _WIN32
+    {
     /* On Windows, inherit system PATH or use a reasonable default */
     const char *syspath = getenv("PATH");
     if (syspath) {
@@ -841,6 +845,7 @@ bf_exec(Var arglist, Byte next, void *vdata, Objid progr)
         free_stream(pathstream);
     } else {
         env[0] = str_dup("PATH=C:\\Windows\\System32;C:\\Windows");
+    }
     }
 #else
     env[0] = str_dup("PATH=/bin:/usr/bin");
