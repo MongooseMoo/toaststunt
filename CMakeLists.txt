@@ -256,6 +256,17 @@ set(src_CRYPT
     src/dependencies/crypt/crypt_gensalt.c
     src/dependencies/crypt/crypt_des.c)
 
+# Standalone crypto hash implementations for WASM (replaces nettle)
+if(EMSCRIPTEN)
+    set(src_CRYPTO_HASH
+        src/dependencies/crypto/md5.c
+        src/dependencies/crypto/sha1.c
+        src/dependencies/crypto/sha256.c
+        src/dependencies/crypto/sha512.c
+        src/dependencies/crypto/ripemd160.c
+        src/dependencies/crypto/hmac.c)
+endif()
+
 # Argon2 reference implementation compiled from source (WASM builds)
 if(EMSCRIPTEN AND ARGON2_FOUND)
     set(src_ARGON2
@@ -342,6 +353,7 @@ set(src_SERVER
     ${src_GRAMMAR}
     ${src_YAJL}
     ${src_CRYPT}
+    ${src_CRYPTO_HASH}
     ${src_ARGON2}
     ${src_PCRE}
     ${src_CSRCS}

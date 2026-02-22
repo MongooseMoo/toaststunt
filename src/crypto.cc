@@ -35,7 +35,9 @@
 #include "functions.h"
 #include "crypto.h"
 #include "list.h"
-#ifndef __EMSCRIPTEN__
+#ifdef __EMSCRIPTEN__
+#include "dependencies/crypto/nettle_compat.h"
+#else
 #include <nettle/hmac.h>
 #include <nettle/md5.h>
 #include <nettle/ripemd160.h>
@@ -170,7 +172,6 @@ parse_prefix(const char *prefix, size_t prefix_length,
     return 1;
 }
 
-#ifndef __EMSCRIPTEN__
 static char digits[] = "0123456789ABCDEF";
 
 #define DEF_HASH(algo, size)                            \
@@ -228,6 +229,7 @@ DEF_HMAC(hmac_sha256, 32)
 
 #undef DEF_HMAC
 
+#ifndef __EMSCRIPTEN__
 /**** built in functions ****/
 
 static package
@@ -372,6 +374,7 @@ bf_crypt(Var arglist, Byte next, void *vdata, Objid progr)
 
     return make_var_pack(r);
 }
+#endif /* !__EMSCRIPTEN__ -- bf_salt, bf_crypt */
 
 #define TRY_STREAM enable_stream_exceptions()
 #define ENDTRY_STREAM disable_stream_exceptions()
@@ -696,6 +699,7 @@ bf_value_hmac(Var arglist, Byte next, void *vdata, Objid progr)
 #undef TRY_STREAM
 #undef ENDTRY_STREAM
 
+#ifndef __EMSCRIPTEN__
 void
 register_crypto(void)
 {
@@ -718,11 +722,12 @@ register_crypto(void)
     register_function("binary_hmac", 2, 4, bf_binary_hmac, TYPE_STR, TYPE_STR, TYPE_STR, TYPE_ANY);
     register_function("value_hmac", 2, 4, bf_value_hmac, TYPE_ANY, TYPE_STR, TYPE_STR, TYPE_ANY);
 }
+#endif /* !__EMSCRIPTEN__ -- register_crypto */
 
-#else /* __EMSCRIPTEN__ */
+#ifdef __EMSCRIPTEN__
 
 /* WASM build: bcrypt (crypt_blowfish) and DES (crypt_des) are available.
- * Nettle is NOT available, so hash/HMAC functions remain stubs.
+ * Hash/HMAC functions use standalone implementations via nettle_compat.h.
  */
 
 /**** WASM salt() — same logic as non-WASM, uses crypt_gensalt_*_rn ****/
@@ -878,14 +883,6 @@ bf_crypt(Var arglist, Byte next, void *vdata, Objid progr)
     return make_var_pack(r);
 }
 
-/**** WASM hash/HMAC stubs — nettle not available ****/
-static package
-bf_crypto_stub(Var arglist, Byte next, void *vdata, Objid progr)
-{
-    free_var(arglist);
-    return make_raise_pack(E_PERM, "Crypto hashing not available in WASM builds", var_ref(zero));
-}
-
 void
 register_crypto(void)
 {
@@ -895,12 +892,13 @@ register_crypto(void)
     register_function("salt", 2, 2, bf_salt, TYPE_STR, TYPE_STR);
     register_function("crypt", 1, 2, bf_crypt, TYPE_STR, TYPE_STR);
 
-    register_function("string_hash", 1, 3, bf_crypto_stub, TYPE_STR, TYPE_STR, TYPE_ANY);
-    register_function("binary_hash", 1, 3, bf_crypto_stub, TYPE_STR, TYPE_STR, TYPE_ANY);
-    register_function("value_hash", 1, 3, bf_crypto_stub, TYPE_ANY, TYPE_STR, TYPE_ANY);
-    register_function("string_hmac", 2, 4, bf_crypto_stub, TYPE_STR, TYPE_STR, TYPE_STR, TYPE_ANY);
-    register_function("binary_hmac", 2, 4, bf_crypto_stub, TYPE_STR, TYPE_STR, TYPE_STR, TYPE_ANY);
-    register_function("value_hmac", 2, 4, bf_crypto_stub, TYPE_ANY, TYPE_STR, TYPE_STR, TYPE_ANY);
+    register_function("string_hash", 1, 3, bf_string_hash, TYPE_STR, TYPE_STR, TYPE_ANY);
+    register_function("binary_hash", 1, 3, bf_binary_hash, TYPE_STR, TYPE_STR, TYPE_ANY);
+    register_function("value_hash", 1, 3, bf_value_hash, TYPE_ANY, TYPE_STR, TYPE_ANY);
+
+    register_function("string_hmac", 2, 4, bf_string_hmac, TYPE_STR, TYPE_STR, TYPE_STR, TYPE_ANY);
+    register_function("binary_hmac", 2, 4, bf_binary_hmac, TYPE_STR, TYPE_STR, TYPE_STR, TYPE_ANY);
+    register_function("value_hmac", 2, 4, bf_value_hmac, TYPE_ANY, TYPE_STR, TYPE_STR, TYPE_ANY);
 }
 
 #endif /* __EMSCRIPTEN__ */
