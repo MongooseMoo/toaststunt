@@ -221,7 +221,8 @@ set(src_YAJL
 
 set(src_CRYPT
     src/dependencies/crypt/crypt_blowfish.c
-    src/dependencies/crypt/crypt_gensalt.c)
+    src/dependencies/crypt/crypt_gensalt.c
+    src/dependencies/crypt/crypt_des.c)
 
 set(src_CXXSRCS
     src/ast.cc

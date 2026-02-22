@@ -56,10 +56,10 @@ static int algorithms = 0;
 #define SHA512 (1<<3)
 #define BCRYPT (1<<4)
 
-#define HAS_MD5    (algorithms | MD5)
-#define HAS_SHA256 (algorithms | SHA256)
-#define HAS_SHA512 (algorithms | SHA512)
-#define HAS_BCRYPT (algorithms | BCRYPT)
+#define HAS_MD5    (algorithms & MD5)
+#define HAS_SHA256 (algorithms & SHA256)
+#define HAS_SHA512 (algorithms & SHA512)
+#define HAS_BCRYPT (algorithms & BCRYPT)
 
 extern "C" {
 
@@ -80,6 +80,8 @@ extern "C" {
     extern char *_crypt_blowfish_rn(const char *, const char *,
                                     char *, int);
 }
+
+#include "dependencies/crypt/crypt_des.h"
 
 /* Parse a salt prefix.  Identify the format, the count (AKA rounds or
  * work factor), and the start of any trailing characters not part of
@@ -698,12 +700,12 @@ void
 register_crypto(void)
 {
     if (!strncmp("$1$", crypt("password", "$1$"), 3))
-        algorithms = HAS_MD5;
+        algorithms |= MD5;
     if (!strncmp("$5$", crypt("password", "$5$"), 3))
-        algorithms = HAS_SHA256;
+        algorithms |= SHA256;
     if (!strncmp("$6$", crypt("password", "$6$"), 3))
-        algorithms = HAS_SHA512;
-    algorithms = HAS_BCRYPT;
+        algorithms |= SHA512;
+    algorithms |= BCRYPT;
 
     register_function("salt", 2, 2, bf_salt, TYPE_STR, TYPE_STR);
     register_function("crypt", 1, 2, bf_crypt, TYPE_STR, TYPE_STR);
@@ -719,7 +721,164 @@ register_crypto(void)
 
 #else /* __EMSCRIPTEN__ */
 
-/* WASM stub: Nettle not available. Register crypto functions as stubs. */
+/* WASM build: bcrypt (crypt_blowfish) and DES (crypt_des) are available.
+ * Nettle is NOT available, so hash/HMAC functions remain stubs.
+ */
+
+/**** WASM salt() — same logic as non-WASM, uses crypt_gensalt_*_rn ****/
+static package
+bf_salt(Var arglist, Byte next, void *vdata, Objid progr)
+{   /* (prefix, input) */
+    Var r;
+    package p;
+
+    const char *prefix = arglist.v.list[1].v.str;
+    size_t prefix_length = memo_strlen(prefix);
+    const char *input = arglist.v.list[2].v.str;
+
+    const char *rest;
+    size_t rest_length;
+    unsigned long count;
+    int format;
+
+    if (!parse_prefix(prefix, prefix_length, &rest, &rest_length, &count, &format)) {
+        p = make_raise_pack(E_INVARG, "Invalid prefix", var_ref(arglist.v.list[1]));
+        free_var(arglist);
+        return p;
+    }
+
+    char *(*use)(const char *, unsigned long,
+                 const char *, int,
+                 char *, int);
+
+    if (BCRYPT == format)
+        use = _crypt_gensalt_blowfish_rn;
+    else if (!prefix[0] ||
+             (2 <= prefix_length &&
+              memchr(_crypt_itoa64, prefix[0], 64) &&
+              memchr(_crypt_itoa64, prefix[1], 64)))
+        use = _crypt_gensalt_traditional_rn;
+    else {
+        p = make_raise_pack(E_INVARG, "Invalid prefix", var_ref(arglist.v.list[1]));
+        free_var(arglist);
+        return p;
+    }
+
+    int random_length;
+
+    const char *random = binary_to_raw_bytes(input, &random_length);
+
+    if (nullptr == random) {
+        p = make_raise_pack(E_INVARG, "Invalid binary input", var_ref(arglist.v.list[2]));
+        free_var(arglist);
+        return p;
+    }
+
+    errno = 0;
+
+    char output[64];
+    char *ret = use(prefix, count, random, random_length, output, sizeof(output));
+
+    if (errno) {
+        p = make_error_pack(E_INVARG);
+        free_var(arglist);
+        return p;
+    }
+
+    r.type = TYPE_STR;
+    r.v.str = str_dup(ret);
+
+    free_var(arglist);
+
+    return make_var_pack(r);
+}
+
+/**** WASM crypt() — dispatch bcrypt and DES ****/
+static package
+bf_crypt(Var arglist, Byte next, void *vdata, Objid progr)
+{   /* (string, [salt]) */
+    Var r;
+    package p;
+
+    const char *salt;
+    int salt_length;
+
+    static char saltstuff[] =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./";
+
+    char temp[3];
+
+    if (arglist.v.list[0].v.num == 1 || memo_strlen(arglist.v.list[2].v.str) < 2) {
+        /* provide a random 2-letter salt, works with old and new crypts */
+        temp[0] = saltstuff[RANDOM() % (int) strlen(saltstuff)];
+        temp[1] = saltstuff[RANDOM() % (int) strlen(saltstuff)];
+        temp[2] = '\0';
+        salt = temp;
+        salt_length = 2;
+    } else {
+        salt = arglist.v.list[2].v.str;
+        salt_length = memo_strlen(arglist.v.list[2].v.str);
+    }
+
+    const char *rest;
+    size_t rest_length;
+    unsigned long count;
+    int format;
+
+    int success = parse_prefix(salt, salt_length, &rest, &rest_length, &count, &format);
+
+    if (!success) {
+        r.type = TYPE_STR;
+        r.v.str = str_dup(salt);
+        p = make_raise_pack(E_INVARG, "Invalid salt", r);
+        free_var(arglist);
+        return p;
+    }
+    if (!is_wizard(progr) &&
+            ((BCRYPT == format && count != 5) ||
+             (BCRYPT != format && count))) {
+        p = make_raise_pack(E_PERM, "Cannot specify non-default strength", Var::new_int(count));
+        free_var(arglist);
+        return p;
+    }
+
+    if (BCRYPT == format) {
+        /* bcrypt — use _crypt_blowfish_rn (already compiled in crypt_blowfish.c) */
+        errno = 0;
+
+        char output[64];
+        char *ret = _crypt_blowfish_rn(arglist.v.list[1].v.str, salt, output, sizeof(output));
+
+        if (errno) {
+            free_var(arglist);
+            return make_error_pack(E_INVARG);
+        }
+
+        r.type = TYPE_STR;
+        r.v.str = str_dup(ret);
+    }
+    else {
+        /* DES — use _crypt_des_r (compiled in crypt_des.c) */
+        struct crypt_des_data des_data;
+        memset(&des_data, 0, sizeof(des_data));
+
+        char *ret = _crypt_des_r((const unsigned char *)arglist.v.list[1].v.str,
+                                  salt, &des_data);
+        if (!ret) {
+            free_var(arglist);
+            return make_raise_pack(E_INVARG, "Invalid salt for crypt()", var_ref(zero));
+        }
+
+        r.type = TYPE_STR;
+        r.v.str = str_dup(ret);
+    }
+
+    free_var(arglist);
+
+    return make_var_pack(r);
+}
+
+/**** WASM hash/HMAC stubs — nettle not available ****/
 static package
 bf_crypto_stub(Var arglist, Byte next, void *vdata, Objid progr)
 {
@@ -730,10 +889,12 @@ bf_crypto_stub(Var arglist, Byte next, void *vdata, Objid progr)
 void
 register_crypto(void)
 {
-    algorithms = HAS_BCRYPT;
+    _crypt_des_init();
+    algorithms |= BCRYPT;
 
-    register_function("salt", 2, 2, bf_crypto_stub, TYPE_STR, TYPE_STR);
-    register_function("crypt", 1, 2, bf_crypto_stub, TYPE_STR, TYPE_STR);
+    register_function("salt", 2, 2, bf_salt, TYPE_STR, TYPE_STR);
+    register_function("crypt", 1, 2, bf_crypt, TYPE_STR, TYPE_STR);
+
     register_function("string_hash", 1, 3, bf_crypto_stub, TYPE_STR, TYPE_STR, TYPE_ANY);
     register_function("binary_hash", 1, 3, bf_crypto_stub, TYPE_STR, TYPE_STR, TYPE_ANY);
     register_function("value_hash", 1, 3, bf_crypto_stub, TYPE_ANY, TYPE_STR, TYPE_ANY);
