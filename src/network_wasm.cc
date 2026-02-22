@@ -173,6 +173,16 @@ void wasm_close_connection(int conn_id)
     free(h);
 }
 
+/* Defined in server.cc -- sets checkpoint_requested = CHKPT_FUNC */
+extern void server_request_checkpoint(void);
+
+EMSCRIPTEN_KEEPALIVE
+void wasm_checkpoint(void)
+{
+    oklog("WASM: Requesting checkpoint (will execute on next main loop iteration)\n");
+    server_request_checkpoint();
+}
+
 } /* extern "C" */
 
 /**** Standard network interface implementations ****/

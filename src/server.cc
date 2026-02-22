@@ -2688,6 +2688,17 @@ bf_dump_database(Var arglist, Byte next, void *vdata, Objid progr)
     return no_var_pack();
 }
 
+#ifdef WASM_BUILD
+/* External entry point for WASM: request a checkpoint on the next main loop
+ * iteration. This is safe to call from JavaScript because the actual I/O
+ * happens inside the main loop's ASYNCIFY context, not here. */
+extern "C" void
+server_request_checkpoint(void)
+{
+    checkpoint_requested = CHKPT_FUNC;
+}
+#endif
+
 static package
 bf_db_disk_size(Var arglist, Byte next, void *vdata, Objid progr)
 {
