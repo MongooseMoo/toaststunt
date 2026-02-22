@@ -173,6 +173,15 @@ void wasm_close_connection(int conn_id)
     free(h);
 }
 
+EMSCRIPTEN_KEEPALIVE
+void wasm_set_connection_name(int conn_id, const char *name) {
+    wasm_handle *h = find_wasm_handle(conn_id);
+    if (h) {
+        if (h->name) free(h->name);
+        h->name = strdup(name);
+    }
+}
+
 /* Defined in server.cc -- sets checkpoint_requested = CHKPT_FUNC */
 extern void server_request_checkpoint(void);
 
@@ -286,11 +295,25 @@ network_send_line(network_handle nh, const char *line, int flush_ok, bool send_n
         if (send_newline) {
             wasm_output_append(h, "\n", 1);
         }
-        /* Also emit to stdout via EM_ASM so JS print() callback captures it */
+        /* Emit to JS via per-connection callback, falling back to print() */
         if (send_newline)
-            EM_ASM({ Module['print'](UTF8ToString($0)); }, line);
+            EM_ASM({
+                if (Module['onConnectionOutput']) {
+                    Module['onConnectionOutput']($0, UTF8ToString($1));
+                } else if (Module['print']) {
+                    Module['print'](UTF8ToString($1));
+                }
+            }, h->id, line);
         else
-            EM_ASM({ Module['printRaw'] ? Module['printRaw'](UTF8ToString($0)) : Module['print'](UTF8ToString($0)); }, line);
+            EM_ASM({
+                if (Module['onConnectionOutput']) {
+                    Module['onConnectionOutput']($0, UTF8ToString($1));
+                } else if (Module['printRaw']) {
+                    Module['printRaw'](UTF8ToString($1));
+                } else if (Module['print']) {
+                    Module['print'](UTF8ToString($1));
+                }
+            }, h->id, line);
     }
     return 1;
 }

@@ -314,7 +314,7 @@ if(EMSCRIPTEN)
         -sINITIAL_MEMORY=268435456
         -sMODULARIZE
         "-sEXPORT_NAME=ToastStuntModule"
-        "-sEXPORTED_FUNCTIONS=['_main','_wasm_new_connection','_wasm_inject_input','_wasm_get_output','_wasm_clear_output','_wasm_close_connection','_wasm_checkpoint']"
+        "-sEXPORTED_FUNCTIONS=['_main','_wasm_new_connection','_wasm_inject_input','_wasm_get_output','_wasm_clear_output','_wasm_close_connection','_wasm_checkpoint','_wasm_set_connection_name']"
         "-sEXPORTED_RUNTIME_METHODS=['callMain','FS','stringToNewUTF8','UTF8ToString','ccall','cwrap']"
     )
     # Output as .js + .wasm
