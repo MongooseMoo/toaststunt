@@ -157,10 +157,12 @@ add_custom_command(
 if(EMSCRIPTEN)
     # Skip most external library detection for WASM builds.
     # Threads, OpenSSL, CURL, ASPELL, jemalloc are not available.
-    # Nettle, Argon2, PCRE are skipped for now.
+    # Nettle, Argon2 are skipped for now.
     # SQLite3 is compiled from the amalgamation.
+    # PCRE 8.45 is compiled from bundled source in src/dependencies/pcre/.
     message(STATUS "WASM build: Skipping external library detection")
     set(SQLITE3_FOUND 1)
+    set(PCRE_FOUND 1)
 else()
 if(APPLE_SILICON_FOUND)
     set(CMAKE_THREAD_LIBS_INIT "-lpthread")
@@ -210,6 +212,31 @@ endif()
 
 if(PCRE_FOUND)
     list(APPEND src_CSRCS src/dependencies/pcrs.c)
+endif()
+
+# PCRE 8.45 compiled from source for WASM builds
+if(EMSCRIPTEN AND PCRE_FOUND)
+    set(src_PCRE
+        src/dependencies/pcre/pcre_byte_order.c
+        src/dependencies/pcre/pcre_chartables.c
+        src/dependencies/pcre/pcre_compile.c
+        src/dependencies/pcre/pcre_config.c
+        src/dependencies/pcre/pcre_dfa_exec.c
+        src/dependencies/pcre/pcre_exec.c
+        src/dependencies/pcre/pcre_fullinfo.c
+        src/dependencies/pcre/pcre_get.c
+        src/dependencies/pcre/pcre_globals.c
+        src/dependencies/pcre/pcre_maketables.c
+        src/dependencies/pcre/pcre_newline.c
+        src/dependencies/pcre/pcre_ord2utf8.c
+        src/dependencies/pcre/pcre_refcount.c
+        src/dependencies/pcre/pcre_string_utils.c
+        src/dependencies/pcre/pcre_study.c
+        src/dependencies/pcre/pcre_tables.c
+        src/dependencies/pcre/pcre_ucd.c
+        src/dependencies/pcre/pcre_valid_utf8.c
+        src/dependencies/pcre/pcre_version.c
+        src/dependencies/pcre/pcre_xclass.c)
 endif()
 
 set(src_YAJL
@@ -302,6 +329,7 @@ set(src_SERVER
     ${src_GRAMMAR}
     ${src_YAJL}
     ${src_CRYPT}
+    ${src_PCRE}
     ${src_CSRCS}
     ${src_CXXSRCS})
 
@@ -323,6 +351,19 @@ if(EMSCRIPTEN)
     )
     # Output as .js + .wasm
     set_target_properties(moo PROPERTIES SUFFIX ".js")
+
+    # PCRE 8.45 from bundled source: add include path so <pcre.h> is found
+    target_include_directories(moo PRIVATE ${CMAKE_SOURCE_DIR}/src/dependencies/pcre)
+
+    # PCRE source files need configuration defines. We use -include to
+    # force-include pcre_config_wasm.h before any other header, without
+    # defining HAVE_CONFIG_H (which would cause PCRE to #include "config.h"
+    # and potentially find ToastStunt's config.h instead).
+    if(PCRE_FOUND)
+        set_source_files_properties(${src_PCRE} PROPERTIES
+            COMPILE_FLAGS "-include ${CMAKE_SOURCE_DIR}/src/dependencies/pcre/pcre_config_wasm.h"
+        )
+    endif()
 else()
 # Make sure we have the packages we need
 include_directories(${NETTLE_INCLUDE_DIRS})

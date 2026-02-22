@@ -86,7 +86,7 @@
 #include "curl.h" /* curl shutdown */
 #include "background.h"
 #include "map.h"
-#ifndef __EMSCRIPTEN__
+#ifdef PCRE_FOUND
 #include "pcre_moo.h" /* pcre shutdown */
 #endif
 
@@ -2414,7 +2414,7 @@ main(int argc, char **argv)
     db_clear_ancestor_cache();
     sqlite_shutdown();
     curl_shutdown();
-#ifndef __EMSCRIPTEN__
+#ifdef PCRE_FOUND
     pcre_shutdown();
 #endif
 
