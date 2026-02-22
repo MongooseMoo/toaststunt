@@ -14,6 +14,7 @@
 #include "list.h"
 #include "storage.h"
 #include "utils.h"
+#include <emscripten.h>
 
 /* External variables (outbound_network_enabled, bind_ipv4, bind_ipv6,
    default_certificate_path, default_key_path) are defined in server.cc */
@@ -143,6 +144,10 @@ network_set_connection_binary(network_handle nh, bool binary)
 int
 network_process_io(int timeout)
 {
+    if (timeout > 0)
+        emscripten_sleep(timeout > 1000000 ? 1000 : timeout / 1000);
+    else
+        emscripten_sleep(10); /* minimal yield even with timeout=0 */
     return 0;
 }
 

@@ -1999,12 +1999,16 @@ main(int argc, char **argv)
 #ifdef __EMSCRIPTEN__
     /* In WASM builds, skip command-line parsing -- use defaults */
     set_log_file(stderr);
+    /* Shift argv past program name (Emscripten argv[0] is thisProgram) */
+    argc--;
+    argv++;
     if (!db_initialize(&argc, &argv)
             || !network_initialize(argc, argv, &desc)) {
         exit(1);
     }
     if (desc.v.num == 0)
         desc.v.num = DEFAULT_PORT;
+    initial_ports.push_back(desc.v.num);
 #else
     int option_index = 0;
     int c = 0;

@@ -314,6 +314,7 @@ if(EMSCRIPTEN)
         -sINITIAL_MEMORY=268435456
         -sMODULARIZE
         "-sEXPORT_NAME=ToastStuntModule"
+        "-sEXPORTED_RUNTIME_METHODS=['callMain','FS']"
     )
     # Output as .js + .wasm
     set_target_properties(moo PROPERTIES SUFFIX ".js")
