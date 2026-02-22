@@ -5,10 +5,14 @@ const TIMEOUT = 30000;
 const wasmDir = path.resolve(__dirname, '../../build-wasm');
 let output = '';
 let serverReady = false;
+let loginVerified = false;
+let commandInjected = false;
+let connId = -1;
 let Module;
 
 const timer = setTimeout(() => {
-  console.error('TIMEOUT: No response received');
+  console.error('TIMEOUT: No response received within ' + TIMEOUT + 'ms');
+  console.error('State: serverReady=' + serverReady + ' loginVerified=' + loginVerified + ' commandInjected=' + commandInjected);
   console.error('Output so far:', output);
   process.exit(1);
 }, TIMEOUT);
@@ -19,50 +23,86 @@ const ToastStuntModule = require(path.join(wasmDir, 'moo.js'));
 const dbText = fs.readFileSync(path.resolve(__dirname, '../../Minimal.db'), 'utf-8').replace(/\r\n/g, '\n');
 const dbData = new TextEncoder().encode(dbText);
 
-function checkForPass(text) {
-  // Check for room description or any MOO output indicating command processed
-  // In Minimal.db, "The First Room" is #2 which is the Wizard's location
-  // We also accept error messages as proof that the command pipeline works
-  if (serverReady && (
-      text.includes('The First Room') ||
-      text.includes('Room') ||
-      text.includes('Minimal') ||
-      text.includes('I couldn\'t') ||
+// Phase 2 check: look for command response AFTER we injected input
+function checkCommandResponse(text) {
+  if (!commandInjected) return;
+  // Any of these indicate the command pipeline processed our input:
+  // - "I couldn't understand that." (unrecognized command in Minimal.db)
+  // - "That is not a valid command." or similar
+  // - Room description text
+  // - Any eval result (for "; 1 + 1" => "2")
+  if (text.includes('I couldn\'t') ||
       text.includes('don\'t understand') ||
       text.includes('huh') ||
-      text.includes('that is not a valid command') ||
-      text.includes('*** Connected ***')
-  )) {
+      text.includes('not a valid command') ||
+      text.includes('The First Room') ||
+      text.includes('Room') ||
+      // eval result: "; 1 + 1" produces "=> 2" or just "2"
+      /^\s*=?>?\s*2\s*$/.test(text) ||
+      text.includes('=> 2')) {
+    console.log('[gate3] Phase 2 PASSED: Command response received: ' + JSON.stringify(text));
     console.log('GATE3_PASS');
     clearTimeout(timer);
     process.exit(0);
   }
 }
 
+// Phase 1: After login output is seen, inject a command
+function onLoginOutput(text) {
+  if (loginVerified || !serverReady) return;
+  if (text.includes('*** Connected ***')) {
+    loginVerified = true;
+    console.log('[gate3] Phase 1 PASSED: Login output verified ("*** Connected ***")');
+    // Now inject a command after a short delay to let the main loop process
+    setTimeout(() => {
+      injectCommand();
+    }, 1000);
+  }
+}
+
+function injectCommand() {
+  if (commandInjected || connId < 0) return;
+  commandInjected = true;
+
+  // Try "; 1 + 1" which is a MOO eval expression — Wizard (#3) can eval
+  const cmd = '; 1 + 1';
+  console.log('[gate3] Injecting command: ' + JSON.stringify(cmd));
+  Module.ccall('wasm_inject_input', null, ['number', 'string'], [connId, cmd]);
+
+  // Also set a fallback: after a delay, check the output buffer directly
+  setTimeout(() => {
+    const outBuf = Module.ccall('wasm_get_output', 'string', ['number'], [connId]);
+    console.log('[gate3] Output buffer after command: ' + JSON.stringify(outBuf));
+    // Check the full buffer for command response
+    if (outBuf) {
+      checkCommandResponse(outBuf);
+    }
+    // If still not passed, try a second command as fallback
+    if (!commandInjected) return; // already exited
+    console.log('[gate3] First command response not detected, trying "xyzzy"...');
+    Module.ccall('wasm_inject_input', null, ['number', 'string'], [connId, 'xyzzy']);
+    setTimeout(() => {
+      const outBuf2 = Module.ccall('wasm_get_output', 'string', ['number'], [connId]);
+      console.log('[gate3] Output buffer after xyzzy: ' + JSON.stringify(outBuf2));
+      if (outBuf2) {
+        checkCommandResponse(outBuf2);
+      }
+      console.error('GATE3_FAIL: Command was injected but no recognizable response received');
+      console.error('Full output buffer:', outBuf2);
+      process.exit(1);
+    }, 3000);
+  }, 3000);
+}
+
 function onServerReady() {
   if (serverReady) return;
   serverReady = true;
   console.log('[gate3] Server is ready, scheduling connection creation...');
-  // Give main loop time to run, then create connection and inject input
   setTimeout(() => {
     try {
       console.log('[gate3] Creating virtual connection...');
-      const connId = Module._wasm_new_connection();
+      connId = Module._wasm_new_connection();
       console.log('[gate3] Connection created, id=' + connId);
-      // Wait for login to complete (needs main loop iterations with emscripten_sleep)
-      setTimeout(() => {
-        console.log('[gate3] Injecting "look" command...');
-        Module.ccall('wasm_inject_input', null, ['number', 'string'], [connId, 'look']);
-        // Give time for the command to be processed
-        setTimeout(() => {
-          // If we haven't passed yet, check the output buffer directly
-          const outBuf = Module.ccall('wasm_get_output', 'string', ['number'], [connId]);
-          console.log('[gate3] Output buffer:', outBuf);
-          if (outBuf && outBuf.length > 0) {
-            checkForPass(outBuf);
-          }
-        }, 3000);
-      }, 3000);
     } catch(e) {
       console.error('[gate3] Connection error:', e);
     }
@@ -73,7 +113,8 @@ ToastStuntModule({
   print: (text) => {
     output += text + '\n';
     console.log('[out] ' + text);
-    checkForPass(text);
+    onLoginOutput(text);
+    checkCommandResponse(text);
   },
   printErr: (text) => {
     output += '[err] ' + text + '\n';
