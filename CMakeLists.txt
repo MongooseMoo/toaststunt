@@ -157,12 +157,14 @@ add_custom_command(
 if(EMSCRIPTEN)
     # Skip most external library detection for WASM builds.
     # Threads, OpenSSL, CURL, ASPELL, jemalloc are not available.
-    # Nettle, Argon2 are skipped for now.
+    # Nettle is skipped for now.
     # SQLite3 is compiled from the amalgamation.
     # PCRE 8.45 is compiled from bundled source in src/dependencies/pcre/.
+    # Argon2 is compiled from reference C implementation in src/dependencies/argon2/.
     message(STATUS "WASM build: Skipping external library detection")
     set(SQLITE3_FOUND 1)
     set(PCRE_FOUND 1)
+    set(ARGON2_FOUND 1)
 else()
 if(APPLE_SILICON_FOUND)
     set(CMAKE_THREAD_LIBS_INIT "-lpthread")
@@ -254,6 +256,17 @@ set(src_CRYPT
     src/dependencies/crypt/crypt_gensalt.c
     src/dependencies/crypt/crypt_des.c)
 
+# Argon2 reference implementation compiled from source (WASM builds)
+if(EMSCRIPTEN AND ARGON2_FOUND)
+    set(src_ARGON2
+        src/dependencies/argon2/argon2.c
+        src/dependencies/argon2/core.c
+        src/dependencies/argon2/encoding.c
+        src/dependencies/argon2/ref.c
+        src/dependencies/argon2/thread.c
+        src/dependencies/argon2/blake2/blake2b.c)
+endif()
+
 set(src_CXXSRCS
     src/ast.cc
     src/base64.cc
@@ -329,6 +342,7 @@ set(src_SERVER
     ${src_GRAMMAR}
     ${src_YAJL}
     ${src_CRYPT}
+    ${src_ARGON2}
     ${src_PCRE}
     ${src_CSRCS}
     ${src_CXXSRCS})
@@ -354,6 +368,15 @@ if(EMSCRIPTEN)
 
     # PCRE 8.45 from bundled source: add include path so <pcre.h> is found
     target_include_directories(moo PRIVATE ${CMAKE_SOURCE_DIR}/src/dependencies/pcre)
+
+    # Argon2 reference implementation: add include path so <argon2.h> is found
+    if(ARGON2_FOUND)
+        target_include_directories(moo PRIVATE ${CMAKE_SOURCE_DIR}/src/dependencies/argon2)
+        # Compile argon2 source files with threading disabled for WASM
+        set_source_files_properties(${src_ARGON2} PROPERTIES
+            COMPILE_FLAGS "-DARGON2_NO_THREADS"
+        )
+    endif()
 
     # PCRE source files need configuration defines. We use -include to
     # force-include pcre_config_wasm.h before any other header, without
