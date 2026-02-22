@@ -35,11 +35,13 @@
 #include "functions.h"
 #include "crypto.h"
 #include "list.h"
+#ifndef __EMSCRIPTEN__
 #include <nettle/hmac.h>
 #include <nettle/md5.h>
 #include <nettle/ripemd160.h>
 #include <nettle/sha1.h>
 #include <nettle/sha2.h>
+#endif
 #include "random.h"
 #include "server.h"
 #include "storage.h"
@@ -166,6 +168,7 @@ parse_prefix(const char *prefix, size_t prefix_length,
     return 1;
 }
 
+#ifndef __EMSCRIPTEN__
 static char digits[] = "0123456789ABCDEF";
 
 #define DEF_HASH(algo, size)                            \
@@ -713,3 +716,30 @@ register_crypto(void)
     register_function("binary_hmac", 2, 4, bf_binary_hmac, TYPE_STR, TYPE_STR, TYPE_STR, TYPE_ANY);
     register_function("value_hmac", 2, 4, bf_value_hmac, TYPE_ANY, TYPE_STR, TYPE_STR, TYPE_ANY);
 }
+
+#else /* __EMSCRIPTEN__ */
+
+/* WASM stub: Nettle not available. Register crypto functions as stubs. */
+static package
+bf_crypto_stub(Var arglist, Byte next, void *vdata, Objid progr)
+{
+    free_var(arglist);
+    return make_raise_pack(E_PERM, "Crypto hashing not available in WASM builds", var_ref(zero));
+}
+
+void
+register_crypto(void)
+{
+    algorithms = HAS_BCRYPT;
+
+    register_function("salt", 2, 2, bf_crypto_stub, TYPE_STR, TYPE_STR);
+    register_function("crypt", 1, 2, bf_crypto_stub, TYPE_STR, TYPE_STR);
+    register_function("string_hash", 1, 3, bf_crypto_stub, TYPE_STR, TYPE_STR, TYPE_ANY);
+    register_function("binary_hash", 1, 3, bf_crypto_stub, TYPE_STR, TYPE_STR, TYPE_ANY);
+    register_function("value_hash", 1, 3, bf_crypto_stub, TYPE_ANY, TYPE_STR, TYPE_ANY);
+    register_function("string_hmac", 2, 4, bf_crypto_stub, TYPE_STR, TYPE_STR, TYPE_STR, TYPE_ANY);
+    register_function("binary_hmac", 2, 4, bf_crypto_stub, TYPE_STR, TYPE_STR, TYPE_STR, TYPE_ANY);
+    register_function("value_hmac", 2, 4, bf_crypto_stub, TYPE_ANY, TYPE_STR, TYPE_STR, TYPE_ANY);
+}
+
+#endif /* __EMSCRIPTEN__ */

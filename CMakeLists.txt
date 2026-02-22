@@ -5,6 +5,13 @@ set(VERSION_RELEASE 3)
 set(VERSION_EXT "_2")
 project(ToastStunt VERSION ${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_RELEASE} LANGUAGES CXX C)
 
+# ---- Emscripten / WASM Build Detection ----
+if(EMSCRIPTEN)
+    message(STATUS "Building for WebAssembly (Emscripten)")
+    set(WASM_BUILD ON)
+    add_definitions(-DWASM_BUILD -DUNFORKED_CHECKPOINTS)
+endif()
+
 # Compile Options
 option(ONLY_32_BITS "Use 32-bit integers instead of 64-bit." OFF)
 option(USE_JEMALLOC "Use jemalloc (if available) for memory allocation." OFF)
@@ -57,11 +64,15 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_C_STANDARD 99)
 
 # These flags are shared by the RELEASE and WARN build types.
-set(SHARED_COMPILE_FLAGS "-O3")
-if(NOT APPLE_SILICON_FOUND AND NOT IN_A_CONTAINER)
-    set(SHARED_COMPILE_FLAGS "${SHARED_COMPILE_FLAGS} -march=native")
-elseif(APPLE_SILICON_FOUND)
-    set(SHARED_COMPILE_FLAGS "${SHARED_COMPILE_FLAGS} -mcpu=apple-m1")
+if(EMSCRIPTEN)
+    set(SHARED_COMPILE_FLAGS "-O2 -fexceptions")
+else()
+    set(SHARED_COMPILE_FLAGS "-O3")
+    if(NOT APPLE_SILICON_FOUND AND NOT IN_A_CONTAINER)
+        set(SHARED_COMPILE_FLAGS "${SHARED_COMPILE_FLAGS} -march=native")
+    elseif(APPLE_SILICON_FOUND)
+        set(SHARED_COMPILE_FLAGS "${SHARED_COMPILE_FLAGS} -mcpu=apple-m1")
+    endif()
 endif()
 
 # The default for non-developers: Optimization enabled and all warnings silenced.
@@ -143,6 +154,12 @@ add_custom_command(
 # Find packages. We don't do anything with the information yet because we need to know if things exist
 #                to modify the source files, so we have to do it before moo is defined. But we can't
 #                do the package setup UNTIL moo is defined.
+if(EMSCRIPTEN)
+    # Skip ALL external library detection for WASM builds.
+    # Threads, OpenSSL, CURL, ASPELL, jemalloc are not available.
+    # Nettle, Argon2, PCRE, SQLite3 are skipped for Phase 1.
+    message(STATUS "WASM build: Skipping external library detection")
+else()
 if(APPLE_SILICON_FOUND)
     set(CMAKE_THREAD_LIBS_INIT "-lpthread")
     set(CMAKE_HAVE_THREADS_LIBRARY 1)
@@ -168,15 +185,25 @@ if(USE_JEMALLOC)
         set(JEMALLOC_FOUND 1)
     endif()
 endif()
+endif() # NOT EMSCRIPTEN
 
 # Millions of source files
-set(src_CSRCS
-    src/dependencies/thpool.c
-    src/dependencies/sosemanuk.c
-    src/dependencies/linenoise.c
-    src/dependencies/strnatcmp.c
-    src/http_parser.c
-    src/regexpr.c)
+if(EMSCRIPTEN)
+    set(src_CSRCS
+        src/dependencies/sosemanuk.c
+        src/dependencies/strnatcmp.c
+        src/http_parser.c
+        src/regexpr.c)
+    # Skip thpool.c (thread pool) and linenoise.c (terminal I/O) for WASM
+else()
+    set(src_CSRCS
+        src/dependencies/thpool.c
+        src/dependencies/sosemanuk.c
+        src/dependencies/linenoise.c
+        src/dependencies/strnatcmp.c
+        src/http_parser.c
+        src/regexpr.c)
+endif()
 
 if(PCRE_FOUND)
     list(APPEND src_CSRCS src/dependencies/pcrs.c)
@@ -211,7 +238,6 @@ set(src_CXXSRCS
     src/disassemble.cc
     src/eval_env.cc
     src/eval_vm.cc
-    src/exec.cc
     src/execute.cc
     src/extensions.cc
     src/fileio.cc
@@ -223,8 +249,6 @@ set(src_CXXSRCS
     src/list.cc
     src/map.cc
     src/match.cc
-    src/network.cc
-    src/net_mplex.cc
     src/numbers.cc
     src/objects.cc
     src/parse_cmd.cc
@@ -239,19 +263,32 @@ set(src_CXXSRCS
     src/sym_table.cc
     src/system.cc
     src/tasks.cc
-    src/timers.cc
     src/unparse.cc
     src/utils.cc
     src/verbs.cc
     src/version.cc
     src/sqlite.cc
     src/pcre_moo.cc
-    src/background.cc
     src/waif.cc
     src/simplexnoise.cc
     src/argon2.cc
     src/spellcheck.cc
     src/curl.cc)
+
+if(EMSCRIPTEN)
+    # Use WASM stubs instead of native implementations
+    list(APPEND src_CXXSRCS src/exec_wasm.cc)
+    list(APPEND src_CXXSRCS src/timers_wasm.cc)
+    list(APPEND src_CXXSRCS src/network_wasm.cc)
+    list(APPEND src_CXXSRCS src/background_wasm.cc)
+else()
+    # Native build: use original implementations
+    list(APPEND src_CXXSRCS src/exec.cc)
+    list(APPEND src_CXXSRCS src/timers.cc)
+    list(APPEND src_CXXSRCS src/network.cc)
+    list(APPEND src_CXXSRCS src/net_mplex.cc)
+    list(APPEND src_CXXSRCS src/background.cc)
+endif()
 
 set(src_GRAMMAR
     ${BISON_MOOParser_OUTPUTS})
@@ -266,6 +303,21 @@ set(src_SERVER
 
 add_executable(moo ${src_SERVER})
 
+if(EMSCRIPTEN)
+    # WASM: Emscripten-specific compile and link flags
+    target_compile_options(moo PRIVATE -fexceptions)
+    target_link_options(moo PRIVATE
+        -fexceptions
+        -sASYNCIFY
+        -sALLOW_MEMORY_GROWTH
+        -sFORCE_FILESYSTEM
+        -sINITIAL_MEMORY=268435456
+        -sMODULARIZE
+        "-sEXPORT_NAME=ToastStuntModule"
+    )
+    # Output as .js + .wasm
+    set_target_properties(moo PROPERTIES SUFFIX ".js")
+else()
 # Make sure we have the packages we need
 include_directories(${NETTLE_INCLUDE_DIRS})
 target_link_libraries(moo ${NETTLE_LIBRARIES})
@@ -309,16 +361,17 @@ if(JEMALLOC_FOUND)
     target_link_libraries(moo ${JEMALLOC_LIBRARY})
 endif()
 
-# Setup #defines as needed
-CONFIGURE_FILE(${CMAKE_SOURCE_DIR}/src/include/config.h.cmake
-    ${CMAKE_BINARY_DIR}/config.h)
-
 # Configure linker flags
 target_link_libraries(moo -lm ${EXTRA_LINKER_FLAGS})
 
 if(NOT APPLE)
     target_link_libraries(moo -lcrypt)
 endif()
+endif() # NOT EMSCRIPTEN
+
+# Setup #defines as needed
+CONFIGURE_FILE(${CMAKE_SOURCE_DIR}/src/include/config.h.cmake
+    ${CMAKE_BINARY_DIR}/config.h)
 
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C flags: ${CMAKE_C_FLAGS}")

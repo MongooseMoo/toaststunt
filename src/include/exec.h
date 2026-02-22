@@ -31,6 +31,7 @@
 #define Exec_H 1
 
 #include "config.h"
+#include <sys/types.h>  /* pid_t */
 
 extern char *exec_subdir;
 

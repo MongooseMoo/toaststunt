@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/time.h>       // getrusage
+#ifndef __EMSCRIPTEN__
 #include <sys/resource.h>   // getrusage
 #if !defined(__FreeBSD__) && !defined(__MACH__)
 #include <sys/sysinfo.h>    // CPU usage
@@ -28,13 +29,16 @@
 #include <mach/mach.h>
 #include <sys/sysctl.h>
 #endif
+#endif /* !__EMSCRIPTEN__ */
 
 #include <string>
 #include <sstream>
 #include <fstream>
 #include <vector>
 #include <mutex>
+#ifndef __EMSCRIPTEN__
 #include <getopt.h>
+#endif
 #include <sys/types.h>      /* must be first on some systems */
 #include <signal.h>
 #include <stdarg.h>
@@ -42,8 +46,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#ifndef __EMSCRIPTEN__
 #include <sys/wait.h>
 #include <netinet/in.h>
+#endif
 
 #include "config.h"
 #include "db.h"
@@ -58,7 +64,9 @@
 #include "list.h"
 #include "log.h"
 #include "map.h"
+#ifndef __EMSCRIPTEN__
 #include <nettle/sha2.h>
+#endif
 #include "network.h"
 #include "numbers.h"
 #include "options.h"
@@ -78,20 +86,26 @@
 #include "curl.h" /* curl shutdown */
 #include "background.h"
 #include "map.h"
+#ifndef __EMSCRIPTEN__
 #include "pcre_moo.h" /* pcre shutdown */
+#endif
 
 #ifdef JEMALLOC_FOUND
 #include <jemalloc/jemalloc.h>
 #endif
 
+#ifndef __EMSCRIPTEN__
 extern "C" {
 #include "dependencies/linenoise.h"
 }
+#endif
 
 #define RANDOM_DEVICE "/dev/urandom"
 
+#ifndef __EMSCRIPTEN__
 static pid_t parent_pid;
 static bool in_child = false;
+#endif
 
 static const char *this_program;
 
@@ -111,7 +125,9 @@ static int checkpoint_finished = 0; /* 1 = failure, 2 = success */
 
 static bool reopen_logfile_requested = false;
 
+#ifndef __EMSCRIPTEN__
 static void handle_user_defined_signal(int sig);
+#endif
 
 #ifdef OUTBOUND_NETWORK
 int outbound_network_enabled = OUTBOUND_NETWORK;
@@ -307,7 +323,11 @@ panic_moo(const char *message)
 {
     static int in_panic = 0;
 
+#ifdef __EMSCRIPTEN__
+    errlog("PANIC: %s\n", message);
+#else
     errlog("PANIC%s: %s\n", in_child ? " (in child)" : "", message);
+#endif
     if (in_panic) {
         errlog("RECURSIVE PANIC: aborting\n");
         abort_server();
@@ -316,11 +336,13 @@ panic_moo(const char *message)
 
     log_command_history();
 
+#ifndef __EMSCRIPTEN__
     if (in_child) {     /* We're a forked checkpointer */
         errlog("Child shutting down parent via INT signal\n");
         kill(parent_pid, SIGINT);
         _exit(1);
     }
+#endif
     print_error_backtrace("server panic", output_to_log);
     send_shutdown_message("server panic");
     network_shutdown();
@@ -332,6 +354,10 @@ panic_moo(const char *message)
 enum Fork_Result
 fork_server(const char *subtask_name)
 {
+#ifdef __EMSCRIPTEN__
+    /* fork() not available in WASM */
+    return FORK_ERROR;
+#else
     pid_t pid;
     std::stringstream s;
 
@@ -347,8 +373,10 @@ fork_server(const char *subtask_name)
     } else {
         return FORK_PARENT;
     }
+#endif
 }
 
+#ifndef __EMSCRIPTEN__
 static void
 panic_signal(int sig)
 {
@@ -400,6 +428,8 @@ handle_user_defined_signal(int sig)
     free_var(result);
 }
 
+#endif /* !__EMSCRIPTEN__ (signal handlers part 1) */
+
 static void
 call_checkpoint_notifier(int successful)
 {
@@ -411,6 +441,7 @@ call_checkpoint_notifier(int successful)
     run_server_task(-1, Var::new_obj(SYSTEM_OBJECT), "checkpoint_finished", args, "", nullptr);
 }
 
+#ifndef __EMSCRIPTEN__
 static void
 child_completed_signal(int sig)
 {
@@ -476,6 +507,7 @@ setup_signals(void)
 
     signal(SIGCHLD, child_completed_signal);
 }
+#endif /* !__EMSCRIPTEN__ */
 
 static void
 checkpoint_timer(Timer_ID id, Timer_Data data)
@@ -1002,6 +1034,10 @@ read_stdin_line(const char *prompt)
 
     char *line;
 
+#ifdef __EMSCRIPTEN__
+    /* linenoise not available in WASM -- emergency mode not supported */
+    return (char *)"";
+#else
     if ((line = linenoise(prompt)) && *line) {
         linenoiseHistoryAdd(line);
         stream_add_string(s, line);
@@ -1010,6 +1046,7 @@ read_stdin_line(const char *prompt)
     }
 
     return (char *)"";
+#endif
 }
 
 static void
@@ -1959,6 +1996,16 @@ main(int argc, char **argv)
     std::vector<uint16_t> initial_tls_ports;
 #endif
 
+#ifdef __EMSCRIPTEN__
+    /* In WASM builds, skip command-line parsing -- use defaults */
+    set_log_file(stderr);
+    if (!db_initialize(&argc, &argv)
+            || !network_initialize(argc, argv, &desc)) {
+        exit(1);
+    }
+    if (desc.v.num == 0)
+        desc.v.num = DEFAULT_PORT;
+#else
     int option_index = 0;
     int c = 0;
     static struct option long_options[] =
@@ -2172,6 +2219,7 @@ main(int argc, char **argv)
     // If we caught a port at the end of the arglist, add it to the rest.
     if (desc.v.num != 0)
         initial_ports.push_back(desc.v.num);
+#endif /* !__EMSCRIPTEN__ (end of getopt block) */
 
     /* Now that it's so easy to change file / exec directories, it's easy to forget the last '/'
        We'll helpfully add it back to avoid confusion. */
@@ -2187,6 +2235,7 @@ main(int argc, char **argv)
     applog(LOG_INFO1, "'-----'`   /____/  \\__/  \\__,_/  /_/ /_/ \\__/   v%s\n", server_version);
     applog(LOG_INFO1, "\n");
 
+#ifndef __EMSCRIPTEN__
     if (!emergency)
         fclose(stdout);
 
@@ -2194,6 +2243,7 @@ main(int argc, char **argv)
         fclose(stderr);
 
     parent_pid = getpid();
+#endif
 
     enum PortType {PORT_STANDARD = 0, PORT_TLS};
     enum IPProtocol {PROTO_IPv4 = 0, PROTO_IPv6};
@@ -2204,7 +2254,11 @@ main(int argc, char **argv)
 #ifdef JEMALLOC_FOUND
     applog(LOG_INFO1, "          (Using jemalloc)\n");
 #endif
+#ifndef __EMSCRIPTEN__
     applog(LOG_INFO1, "          (Process id %" PRIdN ")\n", parent_pid);
+#else
+    applog(LOG_INFO1, "          (WASM build)\n");
+#endif
     if (waif_conversion_type != _TYPE_WAIF)
         applog(LOG_WARNING, "(Using type '%i' for waifs; will convert to '%i' at next checkpoint)\n", waif_conversion_type, _TYPE_WAIF);
     if (clear_last_move)
@@ -2303,7 +2357,9 @@ main(int argc, char **argv)
 
     init_random();
 
+#ifndef __EMSCRIPTEN__
     setup_signals();
+#endif
     reset_command_history();
 
     if (script_file_first) {
@@ -2354,7 +2410,9 @@ main(int argc, char **argv)
     db_clear_ancestor_cache();
     sqlite_shutdown();
     curl_shutdown();
+#ifndef __EMSCRIPTEN__
     pcre_shutdown();
+#endif
 
     free_str(this_program);
 
@@ -2536,6 +2594,15 @@ bf_usage(Var arglist, Byte next, void *vdata, Objid progr)
     for (x = 1; x <= 3; x++)
         cpu.v.list[x] = Var::new_int(0); //initialize to all 0
 
+#ifdef __EMSCRIPTEN__
+    /* WASM: no sysinfo or getrusage -- return zeroed values */
+    r.v.list[1].type = TYPE_FLOAT;
+    r.v.list[2].type = TYPE_FLOAT;
+    r.v.list[1].v.fnum = 0.0;
+    r.v.list[2].v.fnum = 0.0;
+    for (x = 3; x <= 9; x++)
+        r.v.list[x].v.num = 0;
+#else
 #if !defined(__FreeBSD__) && !defined(__MACH__)
     struct sysinfo sys_info;
     int info_ret = sysinfo(&sys_info);
@@ -2569,6 +2636,7 @@ bf_usage(Var arglist, Byte next, void *vdata, Objid progr)
     r.v.list[7].v.num = usage.ru_nvcsw;
     r.v.list[8].v.num = usage.ru_nivcsw;
     r.v.list[9].v.num = usage.ru_nsignals;
+#endif /* !__EMSCRIPTEN__ */
 
     // Add in our load averages.
     r = listinsert(r, cpu, 1);

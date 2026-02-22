@@ -555,6 +555,25 @@
 #define CURL_TIMEOUT 60
 
 /*****************************************************************************
+ ********** WASM Build Overrides *********************************************
+ *****************************************************************************/
+#ifdef WASM_BUILD
+/* Force options required for WebAssembly/Emscripten builds */
+#ifndef UNFORKED_CHECKPOINTS
+#define UNFORKED_CHECKPOINTS
+#endif
+#undef OUTBOUND_NETWORK
+#define OUTBOUND_NETWORK 0
+#undef USE_TLS
+#undef DEFAULT_THREAD_MODE
+#define DEFAULT_THREAD_MODE false
+#undef NO_NAME_LOOKUP
+#define NO_NAME_LOOKUP 1
+#undef TOTAL_BACKGROUND_THREADS
+#define TOTAL_BACKGROUND_THREADS 0
+#endif /* WASM_BUILD */
+
+/*****************************************************************************
  ********** You shouldn't need to change anything below this point. **********
  *****************************************************************************/
 

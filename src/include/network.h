@@ -26,7 +26,11 @@
 #include "structures.h"
 #include "streams.h"
 #include "functions.h"
+#ifdef __EMSCRIPTEN__
+#include <sys/socket.h>  /* sa_family_t for Emscripten */
+#else
 #include <netdb.h>      // sa_family_t
+#endif
 
 /* These get set by command-line options in server.cc */
 extern int outbound_network_enabled;
