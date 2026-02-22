@@ -9,7 +9,7 @@ project(ToastStunt VERSION ${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_RELEASE} 
 if(EMSCRIPTEN)
     message(STATUS "Building for WebAssembly (Emscripten)")
     set(WASM_BUILD ON)
-    add_definitions(-DWASM_BUILD -DUNFORKED_CHECKPOINTS)
+    add_definitions(-DWASM_BUILD -DUNFORKED_CHECKPOINTS -DSQLITE_THREADSAFE=0)
 endif()
 
 # Compile Options
@@ -155,10 +155,12 @@ add_custom_command(
 #                to modify the source files, so we have to do it before moo is defined. But we can't
 #                do the package setup UNTIL moo is defined.
 if(EMSCRIPTEN)
-    # Skip ALL external library detection for WASM builds.
+    # Skip most external library detection for WASM builds.
     # Threads, OpenSSL, CURL, ASPELL, jemalloc are not available.
-    # Nettle, Argon2, PCRE, SQLite3 are skipped for Phase 1.
+    # Nettle, Argon2, PCRE are skipped for now.
+    # SQLite3 is compiled from the amalgamation.
     message(STATUS "WASM build: Skipping external library detection")
+    set(SQLITE3_FOUND 1)
 else()
 if(APPLE_SILICON_FOUND)
     set(CMAKE_THREAD_LIBS_INIT "-lpthread")
@@ -192,6 +194,7 @@ if(EMSCRIPTEN)
     set(src_CSRCS
         src/dependencies/sosemanuk.c
         src/dependencies/strnatcmp.c
+        src/dependencies/sqlite3.c
         src/http_parser.c
         src/regexpr.c)
     # Skip thpool.c (thread pool) and linenoise.c (terminal I/O) for WASM
