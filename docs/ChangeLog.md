@@ -7,6 +7,7 @@
 - Fixed crash on malloc failure when compiling PCRE patterns.
 - Fixed crash when PCRE substring extraction fails.
 - Fixed generate_json mangling strings with ~0 or ~1 followed by non-hex characters.
+- Fixed the build against Nettle 4.0, which dropped the length argument from its `*_digest` functions.
 
 ### New Features
 - Add an optional unclean_shutdown parameter to `shutdown()`, which replicates the functionality found in the `panic()` builtin.

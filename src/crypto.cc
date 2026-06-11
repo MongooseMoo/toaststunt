@@ -40,6 +40,7 @@
 #include <nettle/ripemd160.h>
 #include <nettle/sha1.h>
 #include <nettle/sha2.h>
+#include <nettle/version.h>
 #include "random.h"
 #include "server.h"
 #include "storage.h"
@@ -168,6 +169,14 @@ parse_prefix(const char *prefix, size_t prefix_length,
 
 static char digits[] = "0123456789ABCDEF";
 
+/* Nettle 4.0 dropped the length argument from the *_digest functions
+ * (the output length is now fixed by the algorithm). */
+#if defined(NETTLE_VERSION_MAJOR) && NETTLE_VERSION_MAJOR >= 4
+#define MOO_DIGEST(fn, ctx, size, result) fn((ctx), (result))
+#else
+#define MOO_DIGEST(fn, ctx, size, result) fn((ctx), (size), (result))
+#endif
+
 #define DEF_HASH(algo, size)                            \
     static const char *                             \
     algo##_hash_bytes(const char *input, int length, int binary)            \
@@ -178,7 +187,7 @@ static char digits[] = "0123456789ABCDEF";
         const char *answer = hex;                           \
         algo##_init(&context);                          \
         algo##_update(&context, length, (unsigned char *)input);            \
-        algo##_digest(&context, size, result);                  \
+        MOO_DIGEST(algo##_digest, &context, size, result);                  \
         for (int i = 0; i < size; i++) {                        \
             if (binary) *hex++ = '~';                       \
             *hex++ = digits[result[i] >> 4];                    \
@@ -208,7 +217,7 @@ DEF_HASH(ripemd160, 20)
         const char *answer = hex;                                       \
         algo##_set_key(&context, key_length, (unsigned char *)key);                     \
         algo##_update(&context, message_length, (unsigned char *)message);                  \
-        algo##_digest(&context, size, result);                              \
+        MOO_DIGEST(algo##_digest, &context, size, result);                              \
         for (int i = 0; i < size; i++) {                                    \
             if (binary) *hex++ = '~';                                   \
             *hex++ = digits[result[i] >> 4];                                \
@@ -222,6 +231,7 @@ DEF_HMAC(hmac_sha1, 20)
 DEF_HMAC(hmac_sha256, 32)
 
 #undef DEF_HMAC
+#undef MOO_DIGEST
 
 /**** built in functions ****/
 
