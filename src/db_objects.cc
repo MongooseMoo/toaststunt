@@ -51,8 +51,11 @@ static Num max_objects = 0;
  * anons, complicating refcounts, and  messing with filtering functions
  * like children(), we just keep track of them here. */
 static std::unordered_map<Objid, std::unordered_set<Object*>> anonymous_objects;
+static std::unordered_set<Object*> assigned_anonymous_objects;
 
 static Var all_users;
+
+int anon_valid(Object *o);
 
 #ifdef USE_ANCESTOR_CACHE
 static std::unordered_map <Num, Var> ancestor_cache;
@@ -204,6 +207,7 @@ dbpriv_destroy_anon_map()
         for (Object* obj : x.second)
             to_free.insert(obj);
     anonymous_objects.clear();
+    assigned_anonymous_objects.clear();
     for (Object* obj : to_free) {
         Var z = Var::new_anon(obj);
         free_var(z);
@@ -372,15 +376,21 @@ db_destroy_object(Objid oid)
 Var
 db_read_anonymous()
 {
-    Var r;
-    int oid;
+    return dbpriv_read_anonymous_object(dbio_read_num());
+}
 
-    if ((oid = dbio_read_num()) == NOTHING) {
+Var
+dbpriv_read_anonymous_object(Objid oid)
+{
+    Var r;
+
+    if (oid == NOTHING) {
         r.type = TYPE_ANON;
         r.v.anon = nullptr;
     } else if (max_objects && (oid < max_objects && objects[oid])) {
         r.type = TYPE_ANON;
         r.v.anon = objects[oid];
+        assigned_anonymous_objects.insert(r.v.anon);
         addref(r.v.anon);
     }
     else {
@@ -396,20 +406,21 @@ db_read_anonymous()
         num_objects = sav_objects;
         r.type = TYPE_ANON;
         r.v.anon = objects[oid];
+        assigned_anonymous_objects.insert(r.v.anon);
     }
 
     return r;
 }
 
-void
-db_write_anonymous(Var v)
+Objid
+dbpriv_assign_anonymous_object(Object *o)
 {
     Objid oid;
-    Object *o = (Object *)v.v.anon;
 
-    if (!is_valid(v))
-        oid = NOTHING;
-    else if (o->id != NOTHING)
+    if (!o || !anon_valid(o))
+        return NOTHING;
+    assigned_anonymous_objects.insert(o);
+    if (o->id != NOTHING)
         oid = o->id;
     else {
         ensure_new_object();
@@ -417,6 +428,20 @@ db_write_anonymous(Var v)
         oid = o->id = num_objects;
         num_objects++;
     }
+
+    return oid;
+}
+
+int
+dbpriv_is_assigned_anonymous_object(Object *o)
+{
+    return assigned_anonymous_objects.find(o) != assigned_anonymous_objects.end();
+}
+
+void
+db_write_anonymous(Var v)
+{
+    Objid oid = dbpriv_assign_anonymous_object((Object *)v.v.anon);
 
     dbio_write_num(oid);
 }

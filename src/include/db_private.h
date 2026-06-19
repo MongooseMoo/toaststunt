@@ -109,6 +109,9 @@ extern void db_priv_affected_callable_verb_lookup(void);
 
 extern Var db_read_anonymous();
 extern void db_write_anonymous(Var);
+extern Objid dbpriv_assign_anonymous_object(Object *);
+extern Var dbpriv_read_anonymous_object(Objid);
+extern int dbpriv_is_assigned_anonymous_object(Object *);
 
 extern Objid dbpriv_object_owner(Object *);
 extern void dbpriv_set_object_owner(Object *, Objid owner);

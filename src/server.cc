@@ -723,6 +723,34 @@ write_values_pending_finalization(void)
     }
 }
 
+Var
+values_pending_finalization_for_json(void)
+{
+    unsigned int pending_waif_count = 0;
+    struct pending_recycle *head;
+    Var values;
+    int index = 1;
+
+    for (auto &x : destroyed_waifs)
+        if (x.second == false)
+            pending_waif_count++;
+
+    values = new_list(pending_count + pending_waif_count);
+
+    head = pending_head;
+    while (head) {
+        values.v.list[index++] = var_ref(head->v);
+        head = head->next;
+    }
+
+    for (auto &x : destroyed_waifs) {
+        if (x.second == false)
+            values.v.list[index++] = var_ref(Var::new_waif(x.first));
+    }
+
+    return values;
+}
+
 /* When the server loads the database, the objects pending recycling
  * are read in as well.  However, at the point that this function is
  * called, these objects are empty slots that will hold to-be-built
@@ -749,6 +777,20 @@ read_values_pending_finalization(void)
     }
 
     return 1;
+}
+
+void
+read_empty_values_pending_finalization(void)
+{
+    free_var(pending_list);
+    pending_list = new_list(0);
+}
+
+void
+read_values_pending_finalization_from_json(Var values)
+{
+    free_var(pending_list);
+    pending_list = values;
 }
 
 static void
@@ -1817,6 +1859,32 @@ write_active_connections(void)
     all_shandles_mutex.unlock();
 }
 
+Var
+active_connections_for_json(void)
+{
+    int count = 0;
+    int index = 1;
+    shandle *h;
+    Var connections;
+
+    all_shandles_mutex.lock();
+
+    for (h = all_shandles; h; h = h->next)
+        count++;
+
+    connections = new_list(count);
+    for (h = all_shandles; h; h = h->next) {
+        Var connection = new_list(2);
+        connection.v.list[1] = Var::new_obj(h->player);
+        connection.v.list[2] = Var::new_obj(h->listener);
+        connections.v.list[index++] = connection;
+    }
+
+    all_shandles_mutex.unlock();
+
+    return connections;
+}
+
 int
 read_active_connections(void)
 {
@@ -1861,6 +1929,18 @@ read_active_connections(void)
     }
 
     return 1;
+}
+
+void
+read_empty_active_connections(void)
+{
+    checkpointed_connections = new_list(0);
+}
+
+void
+read_active_connections_from_json(Var connections)
+{
+    checkpointed_connections = connections;
 }
 
 int

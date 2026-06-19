@@ -53,6 +53,9 @@ extern void waif_before_loading();
 extern void waif_after_loading();
 extern void write_waif(Var);
 extern Var read_waif();
+extern void waif_update_propdefs_for_saving(Waif *);
+extern int waif_json_register_loaded(unsigned int, Waif *);
+extern int waif_json_ref(unsigned int, Var *);
 extern void free_waif_propdefs(WaifPropdefs *);
 extern void waif_rename_propdef(Object *, const char *, const char *);
 

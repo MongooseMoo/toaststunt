@@ -572,6 +572,12 @@ update_waif_propdefs(Waif *waif)
     free_waif_propdefs(old);
 }
 
+void
+waif_update_propdefs_for_saving(Waif *waif)
+{
+    update_waif_propdefs(waif);
+}
+
 /* Called from complex_free_var()
  */
 void
@@ -944,6 +950,55 @@ waif_before_loading()
     size = sizeof(Waif *) * n_saved_waifs;
     saved_waifs = (Waif **) mymalloc(size, M_WAIF_XTRA);
     memset(saved_waifs, 0, size);
+}
+
+static void
+ensure_waif_load_capacity()
+{
+    if (n_saved_waifs == 0) {
+        n_saved_waifs = 256;
+        saved_waifs = (Waif **) mymalloc(sizeof(Waif *) * n_saved_waifs,
+                                         M_WAIF_XTRA);
+        memset(saved_waifs, 0, sizeof(Waif *) * n_saved_waifs);
+    } else if (waif_count == n_saved_waifs) {
+        int old_size = sizeof(Waif *) * n_saved_waifs;
+        n_saved_waifs *= 2;
+        int new_size = sizeof(Waif *) * n_saved_waifs;
+        saved_waifs = (Waif **) myrealloc(saved_waifs, new_size, M_WAIF_XTRA);
+        memset((char *)saved_waifs + old_size, 0, new_size - old_size);
+    }
+}
+
+int
+waif_json_register_loaded(unsigned int index, Waif *w)
+{
+    ensure_waif_load_capacity();
+
+    if (index != waif_count || !w)
+        return 0;
+
+    saved_waifs[waif_count++] = w;
+    waif_class_count[w->_class]++;
+    return 1;
+}
+
+int
+waif_json_ref(unsigned int index, Var *value)
+{
+    Waif *w;
+    Var result;
+
+    if (!value || index >= n_saved_waifs)
+        return 0;
+
+    w = saved_waifs[index];
+    if (!w)
+        return 0;
+
+    result.type = TYPE_WAIF;
+    result.v.waif = w;
+    *value = var_ref(result);
+    return 1;
 }
 
 Var

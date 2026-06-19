@@ -161,6 +161,9 @@ extern void queue_anonymous_object(Var v);
 
 extern void write_values_pending_finalization(void);
 extern int read_values_pending_finalization(void);
+extern void read_empty_values_pending_finalization(void);
+extern Var values_pending_finalization_for_json(void);
+extern void read_values_pending_finalization_from_json(Var);
 
 /*
  * These procedures represent my frustration with the separation
@@ -290,6 +293,9 @@ extern void boot_player(Objid player);
 
 extern void write_active_connections(void);
 extern int read_active_connections(void);
+extern void read_empty_active_connections(void);
+extern Var active_connections_for_json(void);
+extern void read_active_connections_from_json(Var);
 
 
 
