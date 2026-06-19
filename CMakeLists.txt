@@ -202,8 +202,12 @@ set(src_CXXSRCS
     src/code_gen.cc
     src/collection.cc
     src/crypto.cc
+    src/db_backend.cc
     src/db_file.cc
     src/db_io.cc
+    src/db_json.cc
+    src/db_json_dump.cc
+    src/db_json_load.cc
     src/db_objects.cc
     src/db_properties.cc
     src/db_verbs.cc
