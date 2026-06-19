@@ -270,6 +270,14 @@ set(src_SERVER
 
 add_executable(moo ${src_SERVER})
 
+add_executable(test_db_backend
+    test/test_db_backend.cc
+    src/db_backend.cc
+    src/db_json.cc
+    src/map.cc
+    src/storage.cc
+    ${src_YAJL})
+
 # Make sure we have the packages we need
 include_directories(${NETTLE_INCLUDE_DIRS})
 target_link_libraries(moo ${NETTLE_LIBRARIES})
