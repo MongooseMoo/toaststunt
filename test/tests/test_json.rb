@@ -388,11 +388,13 @@ class TestJson < Test::Unit::TestCase
     end
   end
 
-  def generate_json(value, mode = nil)
+  def generate_json(value, mode = nil, disable_binary_string_processing = nil)
     if mode.nil?
       simplify command %Q|; return generate_json(#{value_ref(value)});|
-    else
+    elsif disable_binary_string_processing.nil?
       simplify command %Q|; return generate_json(#{value_ref(value)}, #{value_ref(mode)});|
+    else
+      simplify command %Q|; return generate_json(#{value_ref(value)}, #{value_ref(mode)}, #{value_ref(disable_binary_string_processing)});|
     end
   end
 
