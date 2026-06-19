@@ -688,10 +688,11 @@ read_all_from_file(FILE *file, std::string *contents)
 }
 
 static bool
-write_task_queue_file(const char *path)
+write_task_queue_file(const char *path, Json_Dump_Context *context)
 {
     char tasks_path[4096];
     FILE *task_file = tmpfile();
+    FILE *seed_file = nullptr;
     std::string payload;
     yajl_gen_config cfg = { 0, "", 1 };
     yajl_gen g;
@@ -703,12 +704,28 @@ write_task_queue_file(const char *path)
     if (!task_file)
         return false;
 
+    waif_before_saving();
+    if (!context->waifs.empty()) {
+        seed_file = tmpfile();
+        if (!seed_file) {
+            waif_after_saving();
+            std::fclose(task_file);
+            return false;
+        }
+        dbpriv_set_dbio_output(seed_file);
+        for (unsigned int i = 0; i < context->waifs.size(); i++) {
+            Var waif = Var::new_waif(context->waifs[i]);
+            write_waif(waif);
+        }
+        std::fclose(seed_file);
+    }
     dbpriv_set_dbio_output(task_file);
     write_task_queue();
     if (std::fflush(task_file) != 0)
         ok = false;
     if (ok && !read_all_from_file(task_file, &payload))
         ok = false;
+    waif_after_saving();
     std::fclose(task_file);
 
     if (!ok)
@@ -916,7 +933,7 @@ db_json_write_database_dump(const char *path, int engine_db_version)
          && write_active_connections_file(path, connections)
          && write_anons_file(path, &context)
          && write_waifs_file(path, &context)
-         && write_task_queue_file(path)
+         && write_task_queue_file(path, &context)
          && write_programs_file(path)
          && write_users_file(path);
     free_var(connections);

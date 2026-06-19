@@ -1103,6 +1103,12 @@ db_json_load_database(const char *path)
         return false;
     }
 
+    oklog("LOADING: Reading JSON-v20 WAIFs ...\n");
+    if (!read_waifs_file(path)) {
+        errlog("DB_JSON_LOAD: Bad WAIF file.\n");
+        return false;
+    }
+
     oklog("LOADING: Reading JSON-v20 users ...\n");
     if (!read_users_file(path)) {
         errlog("DB_JSON_LOAD: Bad users file.\n");
@@ -1112,12 +1118,6 @@ db_json_load_database(const char *path)
     oklog("LOADING: Reading JSON-v20 task runtime state ...\n");
     if (!read_task_state_files(path))
         return false;
-
-    oklog("LOADING: Reading JSON-v20 WAIFs ...\n");
-    if (!read_waifs_file(path)) {
-        errlog("DB_JSON_LOAD: Bad WAIF file.\n");
-        return false;
-    }
 
     oklog("LOADING: Reading JSON-v20 pending finalization ...\n");
     if (!read_pending_finalization_file(path)) {

@@ -30,6 +30,11 @@ class JsonV20WaifRoundTrip
     wait_for_server_exit
 
     raise 'waifs.json was not dumped' unless File.exist?(File.join(@json_db, 'waifs.json'))
+    queued_json = File.join(@json_db, 'tasks', 'queued.json')
+    raise 'queued task JSON was not dumped' unless File.exist?(queued_json)
+    queued_payload = File.read(queued_json)
+    raise 'WAIF queued task was not dumped' unless queued_payload.include?('1 queued tasks')
+    raise 'WAIF queued task used stale native WAIF index' unless queued_payload.include?('c 1')
 
     start_server(@json_db, @reload_db, [], @reload_log)
     verify_fixture
@@ -94,6 +99,9 @@ class JsonV20WaifRoundTrip
 
       result = simplify(command(%Q|; #0.json_v20_waif = #{waif_class}:new(); #0.json_v20_waif.data = ["outer" -> ["inner" -> "value"], "n" -> 42]; return {typeof(#0.json_v20_waif) == WAIF, #0.json_v20_waif.data["outer"]["inner"], #0.json_v20_waif.data["n"]};|))
       raise "unexpected setup result: #{result.inspect}" unless result == [1, 'value', 42]
+
+      result = simplify(command(%Q|; queued_waif = #{waif_class}:new(); queued_waif.data = "queued"; fork (3600); #0.json_v20_waif = queued_waif; endfork; return length(queued_tasks());|))
+      raise "unexpected queued WAIF task count: #{result.inspect}" unless result == 1
     end
     close_socket
     shutdown_as_wizard
