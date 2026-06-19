@@ -119,7 +119,7 @@ db_parse_dump_targets(const char *primary_path,
 
     if (secondary_path && secondary_path[0] != '\0' && count < max_targets) {
         targets[count].path = secondary_path;
-        targets[count].backend = db_backend_for_output(secondary_path);
+        targets[count].backend = DB_BACKEND_JSON_V20;
         count++;
     }
 

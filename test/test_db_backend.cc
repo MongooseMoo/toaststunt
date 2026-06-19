@@ -341,6 +341,13 @@ main()
     expect_kind(targets[1].backend, DB_BACKEND_JSON_V20,
                 "second dual target uses json backend");
 
+    count = db_parse_dump_targets("out.db", "json-dump", targets, DB_MAX_DUMP_TARGETS);
+    expect_true(count == 2, "explicit json-v20 dual dump has two targets");
+    expect_kind(targets[0].backend, DB_BACKEND_NATIVE_TEXT,
+                "explicit json-v20 first target uses native backend");
+    expect_kind(targets[1].backend, DB_BACKEND_JSON_V20,
+                "explicit json-v20 secondary target uses json backend");
+
     char dump_dir[512];
     std::snprintf(dump_dir, sizeof(dump_dir), "%s/dump.v20", root);
     expect_true(db_json_write_skeleton_dump(dump_dir, 19),
