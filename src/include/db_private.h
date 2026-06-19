@@ -189,6 +189,7 @@ extern Object *dbpriv_find_object(Objid);
                  */
 
 extern void dbpriv_after_load(void);
+extern int dbpriv_validate_hierarchies(void);
 
 /*********** Properties ***********/
 

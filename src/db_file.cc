@@ -27,7 +27,11 @@
 #include "collection.h"
 #include "config.h"
 #include "db.h"
+#include "db_backend.h"
 #include "db_io.h"
+#include "db_json.h"
+#include "db_json_dump.h"
+#include "db_json_load.h"
 #include "db_private.h"
 #include "list.h"
 #include "log.h"
@@ -44,6 +48,10 @@
 #include "map.h"
 
 static char *input_db_name, *dump_db_name;
+static char *secondary_dump_db_name = nullptr;
+static DB_Backend_Kind input_db_backend = DB_BACKEND_NATIVE_TEXT;
+static DB_Dump_Target dump_targets[DB_MAX_DUMP_TARGETS];
+static int dump_target_count = 0;
 static int dump_generation = 0;
 static const char *header_format_string
     = "** LambdaMOO Database, Format Version %u **\n";
@@ -592,8 +600,8 @@ v4_validate_hierarchies(void)
     return !broken;
 }
 
-static int
-ng_validate_hierarchies()
+int
+dbpriv_validate_hierarchies()
 {
     Objid oid, log_oid;
     Objid size = db_last_used_objid() + 1;
@@ -958,7 +966,7 @@ read_db_file(void)
         }
     }
     else {
-        if (!ng_validate_hierarchies()) {
+        if (!dbpriv_validate_hierarchies()) {
             errlog("READ_DB_FILE: Errors in object hierarchies.\n");
             return 0;
         }
@@ -1113,8 +1121,68 @@ typedef enum {
 const char *reason_names[] =
 {"DUMPING", "CHECKPOINTING", "PANIC-DUMPING"};
 
+static void
+remove_json_dump_dir(const char *path)
+{
+    static const char *subdirs[] = {
+        "objects",
+        "anons",
+        "programs",
+        "tasks",
+    };
+    char child[4096];
+
+    if (!path)
+        return;
+
+    if (snprintf(child, sizeof(child), "%s/manifest.json", path) < (int)sizeof(child))
+        unlink(child);
+    if (snprintf(child, sizeof(child), "%s/users.json", path) < (int)sizeof(child))
+        unlink(child);
+    if (snprintf(child, sizeof(child), "%s/pending-finalization.json", path) < (int)sizeof(child))
+        unlink(child);
+    if (snprintf(child, sizeof(child), "%s/active-connections.json", path) < (int)sizeof(child))
+        unlink(child);
+    if (snprintf(child, sizeof(child), "%s/waifs.json", path) < (int)sizeof(child))
+        unlink(child);
+
+    for (unsigned int i = 0; i < sizeof(subdirs) / sizeof(subdirs[0]); i++) {
+        if (snprintf(child, sizeof(child), "%s/%s/000000.json", path, subdirs[i]) < (int)sizeof(child))
+            unlink(child);
+        if (snprintf(child, sizeof(child), "%s/%s/queued.json", path, subdirs[i]) < (int)sizeof(child))
+            unlink(child);
+        if (snprintf(child, sizeof(child), "%s/%s/suspended.json", path, subdirs[i]) < (int)sizeof(child))
+            unlink(child);
+        if (snprintf(child, sizeof(child), "%s/%s/interrupted.json", path, subdirs[i]) < (int)sizeof(child))
+            unlink(child);
+        if (snprintf(child, sizeof(child), "%s/%s", path, subdirs[i]) < (int)sizeof(child))
+            rmdir(child);
+    }
+
+    rmdir(path);
+}
+
+static void
+remove_dump_artifact(const char *path, DB_Backend_Kind backend)
+{
+    if (backend == DB_BACKEND_JSON_V20)
+        remove_json_dump_dir(path);
+    else
+        remove(path);
+}
+
 static int
-dump_database(Dump_Reason reason)
+promote_dump_artifact(const char *temp_name, const DB_Dump_Target *target)
+{
+    remove_dump_artifact(target->path, target->backend);
+    return rename(temp_name, target->path);
+}
+
+static int
+dump_database_to_target(Dump_Reason reason,
+                        const DB_Dump_Target *target,
+                        int previous_generation,
+                        int target_generation)
 {
     Stream *s = new_stream(100);
     char *temp_name;
@@ -1123,15 +1191,13 @@ dump_database(Dump_Reason reason)
 
 retryDumping:
 
-    stream_printf(s, "%s.#%" PRIdN "#", dump_db_name, dump_generation);
-    remove(reset_stream(s));    /* Remove previous checkpoint */
+    stream_printf(s, "%s.#%" PRIdN "#", target->path, previous_generation);
+    remove_dump_artifact(reset_stream(s), target->backend);    /* Remove previous checkpoint */
 
     if (reason == DUMP_PANIC)
-        stream_printf(s, "%s.PANIC", dump_db_name);
-    else {
-        dump_generation++;
-        stream_printf(s, "%s.#%" PRIdN "#", dump_db_name, dump_generation);
-    }
+        stream_printf(s, "%s.PANIC", target->path);
+    else
+        stream_printf(s, "%s.#%" PRIdN "#", target->path, target_generation);
     temp_name = reset_stream(s);
 
     oklog("%s on %s ...\n", reason_names[reason], temp_name);
@@ -1156,12 +1222,36 @@ retryDumping:
 #endif
 
     success = 1;
-    if ((f = fopen(temp_name, "w")) != nullptr) {
+    if (target->backend == DB_BACKEND_JSON_V20) {
+        if (!db_json_write_database_dump(temp_name, current_db_version)) {
+            log_perror("Trying to dump JSON database");
+            remove_dump_artifact(temp_name, target->backend);
+            if (reason == DUMP_CHECKPOINT) {
+                errlog("Abandoning checkpoint attempt ...\n");
+                success = 0;
+            } else {
+                int retry_interval = 60;
+
+                errlog("Waiting %" PRIdN " seconds and retrying dump ...\n",
+                       retry_interval);
+                timer_sleep(retry_interval);
+                goto retryDumping;
+            }
+        } else {
+            oklog("%s on %s finished\n", reason_names[reason], temp_name);
+            if (reason != DUMP_PANIC) {
+                if (promote_dump_artifact(temp_name, target) != 0) {
+                    log_perror("Renaming temporary JSON dump directory");
+                    success = 0;
+                }
+            }
+        }
+    } else if ((f = fopen(temp_name, "w")) != nullptr) {
         dbpriv_set_dbio_output(f);
         if (!write_db_file(reason_names[reason])) {
             log_perror("Trying to dump database");
             fclose(f);
-            remove(temp_name);
+            remove_dump_artifact(temp_name, target->backend);
             if (reason == DUMP_CHECKPOINT) {
                 errlog("Abandoning checkpoint attempt ...\n");
                 success = 0;
@@ -1179,8 +1269,7 @@ retryDumping:
             fclose(f);
             oklog("%s on %s finished\n", reason_names[reason], temp_name);
             if (reason != DUMP_PANIC) {
-                remove(dump_db_name);
-                if (rename(temp_name, dump_db_name) != 0) {
+                if (promote_dump_artifact(temp_name, target) != 0) {
                     log_perror("Renaming temporary dump file");
                     success = 0;
                 }
@@ -1201,6 +1290,39 @@ retryDumping:
 
     return success;
 }
+
+static int
+dump_database(Dump_Reason reason)
+{
+    int success = 1;
+    int previous_generation = dump_generation;
+    int target_generation = dump_generation;
+
+    if (reason != DUMP_PANIC)
+        target_generation = ++dump_generation;
+
+    if (reason == DUMP_CHECKPOINT) {
+        for (int i = 0; i < dump_target_count; i++)
+            if (!dump_database_to_target(reason, &dump_targets[i],
+                                         previous_generation,
+                                         target_generation))
+                success = 0;
+    } else {
+        for (int pass = 0; pass < 2; pass++) {
+            for (int i = 0; i < dump_target_count; i++) {
+                int is_json = dump_targets[i].backend == DB_BACKEND_JSON_V20;
+                if ((pass == 0) != is_json)
+                    continue;
+                if (!dump_database_to_target(reason, &dump_targets[i],
+                                             previous_generation,
+                                             target_generation))
+                    success = 0;
+            }
+        }
+    }
+
+    return success;
+}
 
 
 /*********** External interface ***********/
@@ -1208,10 +1330,19 @@ retryDumping:
 const char *
 db_usage_string(void)
 {
-    return "input-db-file output-db-file";
+    return "input-db-file output-db-file [--dump-json-v20 output-json-v20-dir]";
 }
 
 static FILE *input_db;
+
+void
+db_set_json_dump_target(const char *path)
+{
+    if (secondary_dump_db_name)
+        free_str(secondary_dump_db_name);
+
+    secondary_dump_db_name = path ? str_dup(path) : nullptr;
+}
 
 int
 db_initialize(int *pargc, char ***pargv)
@@ -1223,8 +1354,26 @@ db_initialize(int *pargc, char ***pargv)
 
     input_db_name = str_dup((*pargv)[0]);
     dump_db_name = str_dup((*pargv)[1]);
+    input_db_backend = db_backend_for_input(input_db_name);
     *pargc -= 2;
     *pargv += 2;
+
+    dump_target_count = db_parse_dump_targets(dump_db_name,
+                        secondary_dump_db_name,
+                        dump_targets,
+                        DB_MAX_DUMP_TARGETS);
+
+    if (input_db_backend == DB_BACKEND_UNSUPPORTED) {
+        fprintf(stderr, "Unsupported input database format: %s\n",
+                input_db_name);
+        return 0;
+    }
+
+    if (input_db_backend == DB_BACKEND_JSON_V20) {
+        input_db = nullptr;
+        dbpriv_build_prep_table();
+        return 1;
+    }
 
     if (!(f = fopen(input_db_name, "r"))) {
         fprintf(stderr, "Cannot open input database file: %s\n",
@@ -1240,6 +1389,23 @@ db_initialize(int *pargc, char ***pargv)
 int
 db_load(void)
 {
+    if (input_db_backend == DB_BACKEND_JSON_V20) {
+        str_intern_open(0);
+        oklog("LOADING: %s\n", input_db_name);
+        if (!db_json_load_database(input_db_name)) {
+            errlog("DB_LOAD: Cannot load JSON-v20 database!\n");
+            str_intern_close();
+            return 0;
+        }
+        oklog("LOADING: %s done, will dump new database on %s\n",
+              input_db_name, dump_db_name);
+        if (secondary_dump_db_name)
+            oklog("LOADING: secondary database dump target is %s\n",
+                  secondary_dump_db_name);
+        str_intern_close();
+        return 1;
+    }
+
     dbpriv_set_dbio_input(input_db);
 
     str_intern_open(0);
@@ -1251,6 +1417,9 @@ db_load(void)
     }
     oklog("LOADING: %s done, will dump new database on %s\n",
           input_db_name, dump_db_name);
+    if (secondary_dump_db_name)
+        oklog("LOADING: secondary database dump target is %s\n",
+              secondary_dump_db_name);
 
     str_intern_close();
 
@@ -1300,6 +1469,8 @@ db_shutdown()
 
     free_str(input_db_name);
     free_str(dump_db_name);
+    if (secondary_dump_db_name)
+        free_str(secondary_dump_db_name);
 
     dbpriv_destroy_anon_map();
 }

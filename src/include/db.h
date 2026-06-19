@@ -60,6 +60,11 @@ extern int db_initialize(int *pargc, char ***pargv);
 				 * database args were valid.
 				 */
 
+extern void db_set_json_dump_target(const char *);
+                /* Sets an optional secondary JSON-v20 dump target before
+                 * db_initialize() is called.
+                 */
+
 extern int db_load(void);
 				/* Does any necessary long-running preparations
 				 * of the database, such as loading significant

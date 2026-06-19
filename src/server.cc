@@ -1989,6 +1989,7 @@ print_usage()
     fprintf(stderr, "\nDATABASE OPTIONS\n");
     fprintf(stderr, "  %-20s %s\n", "-m, --clear-move", "clear the `last_move' builtin property on all objects");
     fprintf(stderr, "  %-20s %s\n", "-w, --waif-type", "convert waifs from the specified type (check with typeof(waif) in your old MOO)");
+    fprintf(stderr, "  %-20s %s\n", "    --dump-json-v20", "also dump a JSON-v20 database directory to the specified path");
     fprintf(stderr, "  %-20s %s\n", "-f, --start-script", "file to load and pass to `#0:do_start_script()'");
     fprintf(stderr, "  %-20s %s\n", "-c, --start-line", "line to pass to `#0:do_start_script()'");
     fprintf(stderr, "\nDIRECTORY OPTIONS\n");
@@ -2049,6 +2050,9 @@ main(int argc, char **argv)
 
     int option_index = 0;
     int c = 0;
+    enum {
+        OPTION_DUMP_JSON_V20 = 1000
+    };
     static struct option long_options[] =
     {
         {"version",         no_argument,        nullptr,            'v'},
@@ -2057,6 +2061,7 @@ main(int argc, char **argv)
         {"start-script",    required_argument,  nullptr,            'f'},
         {"start-line",      required_argument,  nullptr,            'c'},
         {"waif-type",       required_argument,  nullptr,            'w'},
+        {"dump-json-v20",   required_argument,  nullptr,            OPTION_DUMP_JSON_V20},
         {"clear-move",      no_argument,        nullptr,            'm'},
         {"outbound",        no_argument,        nullptr,            'o'},
         {"no-outbound",     no_argument,        nullptr,            'O'},
@@ -2113,6 +2118,10 @@ main(int argc, char **argv)
 
             case 'w':                   /* --waif-type; old waif type to use for conversion */
                 waif_conversion_type = atoi(optarg);
+                break;
+
+            case OPTION_DUMP_JSON_V20:   /* --dump-json-v20; secondary JSON-v20 dump target */
+                db_set_json_dump_target(optarg);
                 break;
 
             case 'm':                   /* --clear-move; clear all last_move properties and don't set new ones */
