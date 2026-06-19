@@ -470,6 +470,55 @@ collect_related_values(Json_Dump_Context *context)
     }
 }
 
+static void
+collect_object_values(Object *o, Json_Dump_Context *context)
+{
+    collect_db_var(o->location, context);
+    collect_db_var(o->last_move, context);
+    collect_db_var(o->contents, context);
+    collect_db_var(o->parents, context);
+    collect_db_var(o->children, context);
+    for (unsigned int i = 0; i < o->nval; i++)
+        collect_db_var(o->propval[i].var, context);
+}
+
+static void
+collect_object_values(Json_Dump_Context *context)
+{
+    Objid last_oid = db_last_used_objid();
+
+    for (Objid oid = 0; oid <= last_oid; oid++) {
+        if (!valid(oid))
+            continue;
+
+        Object *o = dbpriv_find_object(oid);
+        if (dbpriv_object_has_flag(o, FLAG_ANONYMOUS))
+            continue;
+
+        collect_object_values(o, context);
+    }
+}
+
+static void
+collect_assigned_anons(Json_Dump_Context *context)
+{
+    Objid last_oid = db_last_used_objid();
+
+    for (Objid oid = 0; oid <= last_oid; oid++) {
+        if (!valid(oid))
+            continue;
+
+        Object *o = dbpriv_find_object(oid);
+        if (!dbpriv_is_assigned_anonymous_object(o))
+            continue;
+        if (context->anon_ids.find(o) != context->anon_ids.end())
+            continue;
+
+        context->anon_ids[o] = oid;
+        context->anons.push_back(o);
+    }
+}
+
 static bool
 write_waif_propval(yajl_gen g, Num index, Var value, Json_Dump_Context *context)
 {
@@ -693,6 +742,7 @@ write_task_queue_file(const char *path, Json_Dump_Context *context)
     char tasks_path[4096];
     FILE *task_file = tmpfile();
     FILE *seed_file = nullptr;
+    std::vector<unsigned long> saved_waif_maps;
     std::string payload;
     yajl_gen_config cfg = { 0, "", 1 };
     yajl_gen g;
@@ -706,6 +756,7 @@ write_task_queue_file(const char *path, Json_Dump_Context *context)
 
     waif_before_saving();
     if (!context->waifs.empty()) {
+        saved_waif_maps.resize(context->waifs.size() * WAIF_MAPSZ);
         seed_file = tmpfile();
         if (!seed_file) {
             waif_after_saving();
@@ -715,6 +766,9 @@ write_task_queue_file(const char *path, Json_Dump_Context *context)
         dbpriv_set_dbio_output(seed_file);
         for (unsigned int i = 0; i < context->waifs.size(); i++) {
             Var waif = Var::new_waif(context->waifs[i]);
+            std::memcpy(&saved_waif_maps[i * WAIF_MAPSZ],
+                        context->waifs[i]->map,
+                        sizeof(unsigned long) * WAIF_MAPSZ);
             write_waif(waif);
         }
         std::fclose(seed_file);
@@ -725,6 +779,10 @@ write_task_queue_file(const char *path, Json_Dump_Context *context)
         ok = false;
     if (ok && !read_all_from_file(task_file, &payload))
         ok = false;
+    for (unsigned int i = 0; i < context->waifs.size(); i++)
+        std::memcpy(context->waifs[i]->map,
+                    &saved_waif_maps[i * WAIF_MAPSZ],
+                    sizeof(unsigned long) * WAIF_MAPSZ);
     waif_after_saving();
     std::fclose(task_file);
 
@@ -920,20 +978,19 @@ db_json_write_database_dump(const char *path, int engine_db_version)
     Var connections = active_connections_for_json();
     bool ok;
 
-    if (!write_objects_file(path, &context)) {
-        free_var(connections);
-        free_var(pending);
-        return false;
-    }
-
+    collect_object_values(&context);
     collect_db_var(pending, &context);
     collect_related_values(&context);
+    ok = write_task_queue_file(path, &context);
+    collect_assigned_anons(&context);
+    collect_related_values(&context);
 
-    ok = write_pending_finalization_file(path, pending, &context)
+    ok = ok
+         && write_objects_file(path, &context)
+         && write_pending_finalization_file(path, pending, &context)
          && write_active_connections_file(path, connections)
          && write_anons_file(path, &context)
          && write_waifs_file(path, &context)
-         && write_task_queue_file(path, &context)
          && write_programs_file(path)
          && write_users_file(path);
     free_var(connections);
