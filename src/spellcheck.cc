@@ -53,8 +53,13 @@ bf_spellcheck(Var arglist, Byte next, void *vdata, Objid progr) {
     const char *word = arglist.v.list[1].v.str;
     int word_size = memo_strlen(arglist.v.list[1].v.str);
 
+    /* spellcheck(word, 0) only answers whether the word is spelled correctly. */
+    bool want_suggestions = arglist.v.list[0].v.num < 2 || is_true(arglist.v.list[2]);
+
     int correct = aspell_speller_check(spell_checker, word, word_size);
-    if (!correct) {
+    if (!correct && !want_suggestions) {
+        r = Var::new_int(0);
+    } else if (!correct) {
         r = new_list(0);
         Var s;
         s.type = TYPE_STR;
@@ -84,7 +89,7 @@ void register_spellcheck(void)
     oklog("REGISTER_SPELLCHECK: v%s\n", EXT_SPELLCHECK_VERSION);
 #endif
 
-    register_function("spellcheck", 1, 1, bf_spellcheck, TYPE_STR);
+    register_function("spellcheck", 1, 2, bf_spellcheck, TYPE_STR, TYPE_ANY);
 }
 
 #else /* ASPELL_FOUND */

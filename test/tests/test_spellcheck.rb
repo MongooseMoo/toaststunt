@@ -20,6 +20,14 @@ class TestSpellcheck < Test::Unit::TestCase
     end
   end
 
+  def test_that_spellcheck_can_skip_suggestions
+    run_test_as('programmer') do
+      assert_equal 0, simplify(command(%Q|; return spellcheck("recieve", 0);|))
+      assert_equal 1, simplify(command(%Q|; return spellcheck("receive", 0);|))
+      assert_equal 1, simplify(command(%Q|; return ("receive" in spellcheck("recieve", 1)) && 1;|))
+    end
+  end
+
   # An Aspell speller keeps every suggestion list it has produced. 3,000
   # misspelled lookups used to leave about 30 MB behind for good.
   def test_that_suggestions_do_not_accumulate
