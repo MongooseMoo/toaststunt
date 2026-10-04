@@ -428,7 +428,7 @@ class TestJson < Test::Unit::TestCase
 
   def test_that_parse_json_error_for_invalid_json_includes_position
     run_test_as('wizard') do
-      info = capture_error_info('parse_json("{\\\"a\\\": }")')
+      info = capture_error_info('parse_json("{\"a\": }")')
       assert_equal E_INVARG, info[0]
       # Verbose YAJL errors include the problematic text
       assert info[1].include?('{') || info[1].include?('parse error')
