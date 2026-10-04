@@ -1055,6 +1055,7 @@ emergency_mode()
             if (!is_wizard(wizard)) {
                 if (first_valid < 0) {
                     first_valid = db_create_object(-1);
+                    db_set_object_owner(first_valid, first_valid);
                     db_change_parents(Var::new_obj(first_valid), new_list(0), none);
                     printf("** No objects in database; created #%" PRIdN ".\n",
                            first_valid);
@@ -1986,7 +1987,7 @@ main(int argc, char **argv)
         {"outbound",        no_argument,        nullptr,            'o'},
         {"no-outbound",     no_argument,        nullptr,            'O'},
         {"no-ipv6",         no_argument,        nullptr,            '3'},
-        {"tls-port",        no_argument,        nullptr,            't'},
+        {"tls-port",        required_argument,  nullptr,            't'},
         {"ipv4",            required_argument,  nullptr,            '4'},
         {"ipv6",            required_argument,  nullptr,            '6'},
         {"port",            required_argument,  nullptr,            'p'},

@@ -25,6 +25,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <unordered_set>
+
 #include "config.h"
 #include "db.h"
 #include "db_private.h"
@@ -154,13 +156,13 @@ db_match_prep(const char *prepname)
     int argc;
     char *ptr;
     char **argv;
-    char *s, first;
+    char *s, *s1, first;
 
-    s = str_dup(prepname);
-    first = s[0];
+    s = s1 = str_dup(prepname);
+    first = s1[0];
     if (first == '#')
-        first = (++s)[0];
-    prep = (db_prep_spec)strtol(s, &ptr, 10);
+        first = (++s1)[0];
+    prep = (db_prep_spec)strtol(s1, &ptr, 10);
     if (*ptr == '\0') {
         free_str(s);
         if (!isdigit(first) || prep >= NPREPS)
@@ -168,11 +170,11 @@ db_match_prep(const char *prepname)
         else
             return prep;
     }
-    ptr = strchr(s, '/');
+    ptr = strchr(s1, '/');
     if (ptr != nullptr)
         *ptr = '\0';
 
-    argv = parse_into_words(s, &argc);
+    argv = parse_into_words(s1, &argc);
     prep = db_find_prep(argc, argv, nullptr, nullptr);
     free_str(s);
     return prep;
@@ -495,6 +497,20 @@ find_callable_verbdef(Object *start, const char *verb)
 
     Var stack = enlist_var(var_ref(start->parents));
 
+    /* With multiple inheritance the same ancestor is reachable along many
+     * paths, and without a visited set the walk covers every *path* rather
+     * than every *node* -- exponential in the number of stacked diamonds, on
+     * a lookup that runs for every verb call.
+     *
+     * An object can only be reached twice if something on the way up has
+     * more than one parent, so a single-inheritance chain never needs the
+     * set.  Don't build one until the walk actually branches; this lookup is
+     * hot enough that the allocations show up otherwise.
+     */
+    bool branched = (TYPE_LIST == start->parents.type
+                     && listlength(start->parents) > 1);
+    std::unordered_set<Object *> seen;
+
     while (listlength(stack) > 0) {
         Var top;
 
@@ -505,6 +521,11 @@ find_callable_verbdef(Object *start, const char *verb)
 
         if (!o) /* if it's invalid, AKA $nothing */
             continue;
+
+        if (branched && !seen.insert(o).second)
+            continue;
+        if (TYPE_LIST == o->parents.type && listlength(o->parents) > 1)
+            branched = true;
 
         if ((v = find_verbdef_by_name(o, verb, 1)) != nullptr)
             break;
@@ -550,6 +571,14 @@ db_find_callable_verb(Var recv, const char *verb)
     Var stack = new_list(0);
     stack = listappend(stack, var_ref(recv));
 
+    /* See find_callable_verbdef(): the same ancestor must not be expanded
+     * once per path through the hierarchy, and single inheritance never needs
+     * the set.  Both are declared before the label so they survive the
+     * `goto try_again' below -- an object already examined here has already
+     * been searched, or already been expanded. */
+    bool branched = false;
+    std::unordered_set<Object *> seen;
+
 try_again:
     while (listlength(stack) > 0) {
         Var top;
@@ -558,6 +587,12 @@ try_again:
 
         if (top.is_object() && is_valid(top)) {
             o = dbpriv_dereference(top);
+            if (branched && !seen.insert(o).second) {
+                free_var(top);
+                continue;
+            }
+            if (TYPE_LIST == o->parents.type && listlength(o->parents) > 1)
+                branched = true;
             if (o->verbdefs == nullptr) {
                 /* keep looking */
                 stack = (TYPE_OBJ == o->parents.type)

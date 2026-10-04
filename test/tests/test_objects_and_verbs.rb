@@ -53,10 +53,41 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
     [:anonymous, 1]
   ]
 
+  ## Anonymous objects cannot have verbs or properties added to them, so a
+  ## test that reaches one of those built-ins only runs the permanent object
+  ## scenario; the anonymous half could not exercise what it is asserting.
+  PERMANENT_SCENARIOS = [
+    [:object, 0]
+  ]
+
+  ## These built-ins take a permanent object only.
+  def test_that_verb_builtins_reject_anonymous_objects
+    run_test_as('programmer') do
+      o = create(:anonymous, 1)
+      assert_equal E_TYPE, add_verb(o, [player, 'x', 'foobar'], ['this', 'none', 'this'])
+      assert_equal E_TYPE, delete_verb(o, 'foobar')
+      assert_equal E_TYPE, set_verb_info(o, 'foobar', [player, 'x', 'foobar'])
+      assert_equal E_TYPE, verb_args(o, 'foobar')
+      assert_equal E_TYPE, set_verb_args(o, 'foobar', ['this', 'none', 'this'])
+      assert_equal E_TYPE, set_verb_code(o, 'foobar', ['return 0;'])
+    end
+  end
+
+  ## The rest still take one, and find nothing on it.
+  def test_that_the_remaining_verb_builtins_accept_anonymous_objects
+    run_test_as('programmer') do
+      o = create(:anonymous, 1)
+      assert_equal [], verbs(o)
+      assert_equal E_VERBNF, verb_info(o, 'foobar')
+      assert_equal E_VERBNF, verb_code(o, 'foobar')
+      assert_equal 0, respond_to(o, 'foobar')
+    end
+  end
+
   ## add_verb
 
   def test_that_add_verb_works_on_objects
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         r = add_verb(o, ['player', 'x', 'foobar'], ['this', 'none', 'this'])
@@ -68,8 +99,24 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
     end
   end
 
+  def test_that_add_verb_accepts_numeric_preposition_specs
+    PERMANENT_SCENARIOS.each do |args|
+      run_test_as('programmer') do
+        o = create(*args)
+        assert_not_equal E_INVARG, add_verb(o, [player, 'x', 'numeric-prep'], ['this', '#4', 'this'])
+        assert_equal ['this', 'on top of/on/onto/upon', 'this'], verb_args(o, 'numeric-prep')
+        assert_not_equal E_INVARG, add_verb(o, [player, 'x', 'hashed-phrase-prep'], ['this', '#in front of', 'this'])
+        assert_equal ['this', 'in front of', 'this'], verb_args(o, 'hashed-phrase-prep')
+        assert_not_equal E_INVARG, add_verb(o, [player, 'x', 'hashed-alias-prep'], ['this', '#with/using', 'this'])
+        assert_equal ['this', 'with/using', 'this'], verb_args(o, 'hashed-alias-prep')
+        assert_equal E_INVARG, add_verb(o, [player, 'x', 'out-of-range-prep'], ['this', '#99', 'this'])
+        assert_equal E_INVARG, add_verb(o, [player, 'x', 'unknown-prep'], ['this', '#nonsense', 'this'])
+      end
+    end
+  end
+
   def test_that_add_verb_fails_if_the_owner_is_not_valid
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         assert_equal E_INVARG, add_verb(o, [NOTHING, '', 'foobar'], ['this', 'none', 'this'])
@@ -78,7 +125,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_add_verb_fails_if_the_perms_are_garbage
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         assert_equal E_INVARG, add_verb(o, ['player', 'abc', 'foobar'], ['this', 'none', 'this'])
@@ -87,7 +134,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_add_verb_fails_if_the_args_are_garbage
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         assert_equal E_INVARG, add_verb(o, ['player', '', 'foobar'], ['foo', 'bar', 'baz'])
@@ -96,7 +143,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_add_verb_fails_if_the_object_is_not_valid
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         recycle(o)
@@ -106,7 +153,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_add_verb_fails_if_the_programmer_does_not_have_write_permission
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -119,7 +166,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_add_verb_succeeds_if_the_programmer_has_write_permission
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -132,7 +179,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_add_verb_succeeds_if_the_programmer_is_a_wizard
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -145,7 +192,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_add_verb_fails_if_the_programmer_is_not_the_owner_specified_in_verbinfo
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         assert_equal E_PERM, add_verb(o, [SYSTEM, '', 'foobar'], ['this', 'none', 'this'])
@@ -154,7 +201,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_add_verb_succeeds_if_the_programmer_is_the_owner_specified_in_verbinfo
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         assert_not_equal E_PERM, add_verb(o, [player, '', 'foobar'], ['this', 'none', 'this'])
@@ -163,7 +210,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_add_verb_sets_the_owner_if_the_programmer_is_a_wizard
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('wizard') do
         o = create(*args)
         assert_not_equal E_PERM, add_verb(o, [SYSTEM, '', 'foobar'], ['this', 'none', 'this'])
@@ -174,7 +221,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   ## delete_verb
 
   def test_that_delete_verb_works_on_objects
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         add_verb(o, ['player', '', 'foobar'], ['this', 'none', 'this'])
@@ -188,7 +235,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_delete_verb_fails_if_the_object_is_not_valid
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         recycle(o)
@@ -198,7 +245,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_delete_verb_fails_if_the_verb_does_not_exist
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         assert_equal E_VERBNF, delete_verb(o, 'foobar')
@@ -207,7 +254,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_delete_verb_fails_if_the_programmer_does_not_have_write_permission
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -221,7 +268,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_delete_verb_succeeds_if_the_programmer_has_write_permission
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -235,7 +282,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_delete_verb_succeeds_if_the_programmer_is_a_wizard
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -251,7 +298,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   ## verb_info
 
   def test_that_verb_info_works_on_objects
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         add_verb(o, [player, 'rw', 'foobar'], ['this', 'none', 'this'])
@@ -280,7 +327,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_verb_info_fails_if_the_programmer_does_not_have_read_permission
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -293,7 +340,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_verb_info_succeeds_if_the_programmer_has_read_permission
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -306,7 +353,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_verb_info_succeeds_if_the_programmer_is_a_wizard
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -321,7 +368,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   ## verb_args
 
   def test_that_verb_args_works_on_objects
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         add_verb(o, [player, 'rw', 'foobar'], ['any', 'on', 'this'])
@@ -331,7 +378,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_verb_args_fails_if_the_object_is_not_valid
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         recycle(o)
@@ -341,7 +388,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_verb_args_fails_if_the_verb_does_not_exist
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         assert_equal E_VERBNF, verb_args(o, 'foobar')
@@ -350,7 +397,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_verb_args_fails_if_the_programmer_does_not_have_read_permission
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -363,7 +410,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_verb_args_succeeds_if_the_programmer_has_read_permission
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -376,7 +423,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_verb_args_succeeds_if_the_programmer_is_a_wizard
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -391,7 +438,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   ## verb_code
 
   def test_that_verb_code_works_on_objects
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         add_verb(o, [player, 'rw', 'foobar'], ['any', 'on', 'this'])
@@ -420,7 +467,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_verb_code_fails_if_the_programmer_does_not_have_read_permission
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -433,7 +480,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_verb_code_succeeds_if_the_programmer_has_read_permission
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -446,7 +493,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_verb_code_succeeds_if_the_programmer_is_a_wizard
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -461,7 +508,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   ## set_verb_info
 
   def test_that_set_verb_info_works_on_objects
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         add_verb(o, [player, 'rw', 'foobar'], ['any', 'in', 'this'])
@@ -472,7 +519,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_set_verb_info_fails_if_the_object_is_not_valid
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         recycle(o)
@@ -482,7 +529,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_set_verb_info_fails_if_the_verb_does_not_exist
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         assert_equal E_VERBNF, set_verb_info(o, 'foobar', [player, '', 'foobar'])
@@ -491,7 +538,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_set_verb_info_fails_if_the_programmer_does_not_have_write_permission
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -504,7 +551,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_set_verb_info_fails_even_if_the_programmer_has_write_permission
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -517,7 +564,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_set_verb_info_succeeds_if_the_programmer_is_a_wizard
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -532,7 +579,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   ## set_verb_args
 
   def test_that_set_verb_args_works_on_objects
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         add_verb(o, [player, 'rw', 'foobar'], ['any', 'in', 'this'])
@@ -543,7 +590,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_set_verb_args_fails_if_the_object_is_not_valid
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         recycle(o)
@@ -553,7 +600,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_set_verb_args_fails_if_the_verb_does_not_exist
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         assert_equal E_VERBNF, set_verb_args(o, 'foobar', ['any', 'any', 'any'])
@@ -562,7 +609,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_set_verb_args_fails_if_the_programmer_does_not_have_write_permission
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -575,7 +622,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_set_verb_args_succeeds_if_the_programmer_has_write_permission
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -588,7 +635,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_set_verb_args_succeeds_if_the_programmer_is_a_wizard
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -603,7 +650,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   ## set_verb_code
 
   def test_that_set_verb_code_works_on_objects
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         add_verb(o, [player, 'rw', 'foobar'], ['any', 'in', 'this'])
@@ -614,7 +661,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_set_verb_code_fails_if_the_object_is_not_valid
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         recycle(o)
@@ -624,7 +671,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_set_verb_code_fails_if_the_verb_does_not_exist
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         assert_equal E_VERBNF, set_verb_code(o, 'foobar', ['1;', '2;', '3;'])
@@ -633,7 +680,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_set_verb_code_fails_if_the_programmer_does_not_have_write_permission
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -646,7 +693,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_set_verb_code_succeeds_if_the_programmer_has_write_permission
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -659,7 +706,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_set_verb_code_succeeds_if_the_programmer_is_a_wizard
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -674,7 +721,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   ## verbs
 
   def test_that_verbs_works_on_objects
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         assert_equal [], verbs(o)
@@ -755,7 +802,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_respond_to_returns_verb_details_if_the_caller_is_the_owner
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         add_verb(o, ['player', 'x', 'foo'], ['none', 'none', 'none'])
@@ -767,7 +814,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_respond_to_returns_verb_details_if_the_caller_is_a_wizard
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -782,7 +829,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_respond_to_returns_verb_details_if_the_object_is_readable
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -798,7 +845,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_respond_to_returns_true_if_the_verb_is_callable
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -812,7 +859,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_respond_to_returns_false_if_the_verb_is_not_callable
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -828,7 +875,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   ## disassemble
 
   def test_that_disassemble_works
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('programmer') do
         o = create(*args)
         add_verb(o, [player, 'rw', 'foobar'], ['this', 'none', 'this'])
@@ -857,7 +904,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_disassemble_fails_if_the_programmer_does_not_have_read_permission
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -870,7 +917,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_disassemble_succeeds_if_the_programmer_has_read_permission
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -883,7 +930,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_disassemble_succeeds_if_the_programmer_is_a_wizard
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       o = nil
       run_test_as('programmer') do
         o = create(*args)
@@ -898,7 +945,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   ## miscellaneous
 
   def test_that_invocation_and_inheritance_works
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('wizard') do
         a = kahuna(NOTHING, 'a')
         b = kahuna(a, 'b')
@@ -974,7 +1021,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_the_verb_cache_works
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('wizard') do
         c = kahuna(NOTHING, 'c')
         b = kahuna(c, 'b')
@@ -1127,7 +1174,7 @@ class TestObjectsAndVerbs < Test::Unit::TestCase
   end
 
   def test_that_pass_works
-    SCENARIOS.each do |args|
+    PERMANENT_SCENARIOS.each do |args|
       run_test_as('wizard') do
         e = kahuna(NOTHING, 'e')
         b = kahuna(_(e), 'b')

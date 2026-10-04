@@ -130,6 +130,14 @@ class TestJson < Test::Unit::TestCase
     end
   end
 
+  def test_that_boolean_map_keys_generate_json_without_crashing
+    run_test_as('wizard') do
+      assert_equal '{"true":1}', simplify(command(%q|; return generate_json([true -> 1], "common-subset");|))
+      assert_equal '{"false|bool":2}', simplify(command(%q|; return generate_json([false -> 2], "embedded-types");|))
+      assert simplify(command(%q|; value = [true -> 1]; return value == parse_json(generate_json(value, "embedded-types"), "embedded-types");|))
+    end
+  end
+
   def test_that_parsing_json_works_for_complex_values_in_default_mode
     run_test_as('wizard') do
       assert_equal [1, 1.1, "1.2", "#13", "E_ARGS", [2, 2.2, "foo"], {"1" => "1"}], parse_json('[1, 1.1, \"1.2\", \"#13\", \"E_ARGS\", [2, 2.2, \"foo\"], {\"1\": \"1\"}]')
@@ -163,6 +171,17 @@ class TestJson < Test::Unit::TestCase
       assert_equal E_INVARG, parse_json('..')
       assert_equal E_INVARG, parse_json('@$*&#*')
       assert_equal E_INVARG, parse_json('[{[{[')
+    end
+  end
+
+  def test_that_parsing_a_very_long_json_string_does_not_overflow_the_stack
+    run_test_as('programmer') do
+      # Build the input in-MOO so the test protocol and Ruby parser do not
+      # need to transport a multi-megabyte literal.  The old implementation
+      # placed one byte per input byte on the C stack; 16 MiB reliably
+      # exceeded a normal server thread's stack.
+      result = simplify command %q|; value = "x"; for i in [1..24]; value = value + value; endfor; return length(parse_json("\"" + value + "\""));|
+      assert_equal 16_777_216, result
     end
   end
 
@@ -416,13 +435,13 @@ class TestJson < Test::Unit::TestCase
     end
   end
 
-  def generate_json(value, mode = nil, disable_binary = nil)
-    if mode.nil?
+  def generate_json(value, mode = nil, disable_binary_escapes = nil)
+    if !disable_binary_escapes.nil?
+      simplify command %Q|; return generate_json(#{value_ref(value)}, #{value_ref(mode)}, #{value_ref(disable_binary_escapes)});|
+    elsif mode.nil?
       simplify command %Q|; return generate_json(#{value_ref(value)});|
-    elsif disable_binary.nil?
-      simplify command %Q|; return generate_json(#{value_ref(value)}, #{value_ref(mode)});|
     else
-      simplify command %Q|; return generate_json(#{value_ref(value)}, #{value_ref(mode)}, #{value_ref(disable_binary)});|
+      simplify command %Q|; return generate_json(#{value_ref(value)}, #{value_ref(mode)});|
     end
   end
 

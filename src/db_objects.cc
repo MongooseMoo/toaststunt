@@ -563,30 +563,43 @@ db_renumber_object(Objid old)
             int i1, c1, i2, c2;
             Var obj1, obj2;
 
+/* Rewrite every occurrence of `old' in LIST, not just the first, and
+ * write nothing at all if there is none.  The original code broke out of
+ * a search loop and then stored unconditionally -- when the search fell
+ * through, FOR_EACH left the index at cnt + 1 and the store landed one
+ * Var past the end of the list.
+ */
+#define     RENUMBER_IN_LIST(lst)                           \
+    {                                       \
+        Var *_l = (lst).v.list;                         \
+        Num _n = _l[0].v.num, _k;                       \
+        for (_k = 1; _k <= _n; _k++)                        \
+            if (_l[_k].v.obj == old)                    \
+                _l[_k].v.obj = _new;                    \
+    }
+
 #define     FIX(up, down)                           \
     if (TYPE_LIST == o->up.type) {                  \
         FOR_EACH(obj1, o->up, i1, c1) {                 \
-            FOR_EACH(obj2, objects[obj1.v.obj]->down, i2, c2)       \
-            if (obj2.v.obj == old)                  \
-                break;                      \
-            objects[obj1.v.obj]->down.v.list[i2].v.obj = _new;      \
+            Object *_p = dbpriv_find_object(obj1.v.obj);        \
+            if (_p)                             \
+                RENUMBER_IN_LIST(_p->down);             \
         }                               \
     }                                   \
     else if (TYPE_OBJ == o->up.type && NOTHING != o->up.v.obj) {    \
-        FOR_EACH(obj1, objects[o->up.v.obj]->down, i2, c2)      \
-        if (obj1.v.obj == old)                      \
-            break;                          \
-        objects[o->up.v.obj]->down.v.list[i2].v.obj = _new;     \
+        Object *_p = dbpriv_find_object(o->up.v.obj);           \
+        if (_p)                             \
+            RENUMBER_IN_LIST(_p->down);                 \
     }                                   \
     FOR_EACH(obj1, o->down, i1, c1) {                   \
-        if (TYPE_LIST == objects[obj1.v.obj]->up.type) {        \
-            FOR_EACH(obj2, objects[obj1.v.obj]->up, i2, c2)     \
-            if (obj2.v.obj == old)                  \
-                break;                      \
-            objects[obj1.v.obj]->up.v.list[i2].v.obj = _new;        \
+        Object *_c = dbpriv_find_object(obj1.v.obj);            \
+        if (!_c)                                \
+            continue;                           \
+        if (TYPE_LIST == _c->up.type) {                 \
+            RENUMBER_IN_LIST(_c->up);                   \
         }                               \
         else {                              \
-            objects[obj1.v.obj]->up.v.obj = _new;           \
+            _c->up.v.obj = _new;                    \
         }                               \
     }
 
@@ -594,6 +607,7 @@ db_renumber_object(Objid old)
             FIX(location, contents);
 
 #undef      FIX
+#undef      RENUMBER_IN_LIST
 
             /* Fix up anonymous children's parent references */
             {
@@ -1000,7 +1014,7 @@ check_for_duplicates(Var list)
         return 1;
 
     for (i = 1; i <= c; i++)
-        for (j = i + i; j <= c; j++)
+        for (j = i + 1; j <= c; j++)
             if (equality(list.v.list[i], list.v.list[j], 1))
                 return 0;
 
@@ -1031,6 +1045,23 @@ int
 db_change_parents(Var obj, Var new_parents, Var anon_kids)
 {
     if (!check_for_duplicates(new_parents))
+        return 0;
+
+    /* Every new parent must exist.  The callers are supposed to have
+     * checked this, but bf_recreate() historically did not, and the loops
+     * below index objects[] directly. */
+    if (TYPE_OBJ == new_parents.type) {
+        if (NOTHING != new_parents.v.obj && !valid(new_parents.v.obj))
+            return 0;
+    }
+    else if (TYPE_LIST == new_parents.type) {
+        Var p;
+        int pi, pc;
+        FOR_EACH(p, new_parents, pi, pc)
+            if (TYPE_OBJ != p.type || !valid(p.v.obj))
+                return 0;
+    }
+    else
         return 0;
 
     /* Gather a list of anonymous children. */
@@ -1079,26 +1110,38 @@ db_change_parents(Var obj, Var new_parents, Var anon_kids)
 
     Var old_parents = o->parents;
 
-    /* save this; we need it later */
-    Var old_ancestors = db_ancestors(obj, true);
+    /* Record the ancestor list of everything below `obj' while the graph is
+     * still intact.  With multiple inheritance this cannot be reconstructed
+     * afterwards -- see dbpriv_snapshot_ancestry(). */
+    void *ancestry = dbpriv_snapshot_ancestry(obj, anon_kids);
     Var parent;
     int i, c;
 
     /* only adjust the parent's children for permanent objects */
     if (TYPE_OBJ == obj.type) {
         /* remove me/obj from my old parents' children */
-        if (old_parents.type == TYPE_OBJ && old_parents.v.obj != NOTHING)
-            objects[old_parents.v.obj]->children = setremove(objects[old_parents.v.obj]->children, obj);
-        else if (old_parents.type == TYPE_LIST)
+        Object *po;
+
+        if (old_parents.type == TYPE_OBJ && old_parents.v.obj != NOTHING) {
+            if ((po = dbpriv_find_object(old_parents.v.obj)) != nullptr)
+                po->children = setremove(po->children, obj);
+        }
+        else if (old_parents.type == TYPE_LIST) {
             FOR_EACH(parent, old_parents, i, c)
-            objects[parent.v.obj]->children = setremove(objects[parent.v.obj]->children, obj);
+                if ((po = dbpriv_find_object(parent.v.obj)) != nullptr)
+                    po->children = setremove(po->children, obj);
+        }
 
         /* add me/obj to my new parents' children */
-        if (new_parents.type == TYPE_OBJ && new_parents.v.obj != NOTHING)
-            objects[new_parents.v.obj]->children = setadd(objects[new_parents.v.obj]->children, obj);
-        else if (new_parents.type == TYPE_LIST)
+        if (new_parents.type == TYPE_OBJ && new_parents.v.obj != NOTHING) {
+            if ((po = dbpriv_find_object(new_parents.v.obj)) != nullptr)
+                po->children = setadd(po->children, obj);
+        }
+        else if (new_parents.type == TYPE_LIST) {
             FOR_EACH(parent, new_parents, i, c)
-            objects[parent.v.obj]->children = setadd(objects[parent.v.obj]->children, obj);
+                if ((po = dbpriv_find_object(parent.v.obj)) != nullptr)
+                    po->children = setadd(po->children, obj);
+        }
     } else if (obj.type == TYPE_ANON) {
         /* Update the anonymous object map. */
         if (old_parents.type == TYPE_OBJ && old_parents.v.obj != NOTHING)
@@ -1133,12 +1176,8 @@ db_change_parents(Var obj, Var new_parents, Var anon_kids)
     }
 #endif /* USE_ANCESTOR_CACHE */
 
-    Var new_ancestors = db_ancestors(obj, true);
+    dbpriv_fix_properties_after_chparent(ancestry);
 
-    dbpriv_fix_properties_after_chparent(obj, old_ancestors, new_ancestors, anon_kids);
-
-    free_var(old_ancestors);
-    free_var(new_ancestors);
     if (free_anon_kids)
         free_var(anon_kids);
 
@@ -1315,25 +1354,51 @@ db_object_isa(Var object, Var parent)
         dbpriv_find_object(object.v.obj) :
         object.v.anon;
 
+    if (nullptr == o)
+        return 0;
+
     Var ancestor, ancestors = enlist_var(var_ref(o->parents));
+
+    /* Expand each ancestor once; otherwise the walk follows every path
+     * through the inheritance DAG, which is exponential in the number of
+     * stacked diamonds.  A single-inheritance chain cannot reach the same
+     * object twice, so don't pay for the set until the walk branches. */
+    bool branched = (TYPE_LIST == o->parents.type
+                     && listlength(o->parents) > 1);
+    std::unordered_set<Object *> seen;
+
+    int found = 0;
 
     while (listlength(ancestors) > 0) {
         POP_TOP(ancestor, ancestors);
 
-        if (ancestor.v.obj == NOTHING)
+        if (TYPE_OBJ != ancestor.type || NOTHING == ancestor.v.obj) {
+            free_var(ancestor);
             continue;
+        }
 
         if (equality(ancestor, parent, 0)) {
-            free_var(ancestors);
-            return 1;
+            free_var(ancestor);
+            found = 1;
+            break;
         }
 
         t = dbpriv_find_object(ancestor.v.obj);
+        free_var(ancestor);
+
+        if (nullptr == t)
+            continue;
+        if (branched && !seen.insert(t).second)
+            continue;
+        if (TYPE_LIST == t->parents.type && listlength(t->parents) > 1)
+            branched = true;
 
         ancestors = listconcat(ancestors, enlist_var(var_ref(t->parents)));
     }
 
-    return 0;
+    free_var(ancestors);
+
+    return found;
 }
 
 void do_fixup_owners(Object *o, const Objid obj)
