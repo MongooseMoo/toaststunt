@@ -592,6 +592,12 @@ bf_parse_json(Var arglist, Byte next, void *vdata, Objid progr)
                     unsigned char *yajl_err = yajl_get_error(hand, 1,
                         (const unsigned char *)arglist.v.list[1].v.str,
                         strlen(arglist.v.list[1].v.str));
+                    // Sanitize newlines to prevent database corruption
+                    // (dbio_write_string uses newlines as record separators)
+                    for (unsigned char *p = yajl_err; *p; p++) {
+                        if (*p == '\n')
+                            *p = ' ';
+                    }
                     pack = make_raise_pack(E_INVARG, (const char *)yajl_err, var_ref(zero));
                     yajl_free_error(hand, yajl_err);
                 }
