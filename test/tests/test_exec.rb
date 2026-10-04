@@ -28,6 +28,13 @@ class TestExec < Test::Unit::TestCase
     end
   end
 
+  def test_that_exec_fails_for_files_that_cannot_be_executed
+    run_test_as('wizard') do
+      r = exec(['test_not_executable'])
+      assert_equal E_EXEC, r
+    end
+  end
+
   def test_that_io_works
     run_test_as('wizard') do
       r = exec(['test_io'], 'Hello, world!')

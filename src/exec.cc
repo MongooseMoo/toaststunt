@@ -32,6 +32,7 @@
 
 #include <fcntl.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -205,6 +206,8 @@ fork_and_exec(const char *cmd, const char *const args[], const char *const env[]
     int pipeIn[2];
     int pipeOut[2];
     int pipeErr[2];
+    posix_spawn_file_actions_t actions;
+    int status;
 
     if (pipe(pipeIn) < 0) {
         log_perror("EXEC: Couldn't create pipe - in");
@@ -218,33 +221,38 @@ fork_and_exec(const char *cmd, const char *const args[], const char *const env[]
         log_perror("EXEC: Couldn't create pipe - err");
         goto close_out;
     }
-    else if ((pid = fork()) < 0) {
-        log_perror("EXEC: Couldn't fork");
+
+    /* Start the child with posix_spawn() rather than fork() + execve().
+     * fork() copies the page tables of the whole server, so its cost grows
+     * with the size of the database in memory and the server stalls for
+     * that long on every exec().  posix_spawn() does not copy them.
+     *
+     * In the child: the pipes become stdin, stdout and stderr, and the
+     * parent's ends are closed.
+     */
+    if ((status = posix_spawn_file_actions_init(&actions)) != 0) {
+        errno = status;
+        log_perror("EXEC: Couldn't set up spawn");
         goto close_err;
     }
-    else if (0 == pid) { /* child */
-        int status;
+    if ((status = posix_spawn_file_actions_adddup2(&actions, pipeIn[0], STDIN_FILENO)) != 0
+            || (status = posix_spawn_file_actions_adddup2(&actions, pipeOut[1], STDOUT_FILENO)) != 0
+            || (status = posix_spawn_file_actions_adddup2(&actions, pipeErr[1], STDERR_FILENO)) != 0
+            || (status = posix_spawn_file_actions_addclose(&actions, pipeIn[1])) != 0
+            || (status = posix_spawn_file_actions_addclose(&actions, pipeOut[0])) != 0
+            || (status = posix_spawn_file_actions_addclose(&actions, pipeErr[0])) != 0) {
+        errno = status;
+        log_perror("EXEC: Couldn't set up spawn");
+        posix_spawn_file_actions_destroy(&actions);
+        goto close_err;
+    }
 
-        if ((status = dup2(pipeIn[0], STDIN_FILENO)) < 0) {
-            perror("dup2");
-            exit(status);
-        }
-        if ((status = dup2(pipeOut[1], STDOUT_FILENO)) < 0) {
-            perror("dup2");
-            exit(status);
-        }
-        if ((status = dup2(pipeErr[1], STDERR_FILENO)) < 0) {
-            perror("dup2");
-            exit(status);
-        }
-
-        close(pipeIn[1]);
-        close(pipeOut[0]);
-        close(pipeErr[0]);
-
-        status = execve(cmd, (char *const *)args, (char *const *)env);
-        perror("execve");
-        exit(status);
+    status = posix_spawn(&pid, cmd, &actions, nullptr, (char *const *)args, (char *const *)env);
+    posix_spawn_file_actions_destroy(&actions);
+    if (status != 0) {
+        errno = status;
+        log_perror("EXEC: Couldn't spawn");
+        goto close_err;
     }
 
     close(pipeIn[0]);
