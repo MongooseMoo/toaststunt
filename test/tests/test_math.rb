@@ -118,6 +118,6 @@ class TestMath < Test::Unit::TestCase
     run_test_as('programmer') do
       assert_equal 1.0, simplify(command(%Q|; return 1 + 0.0; |))
       assert_equal 1.0, simplify(command(%Q|; return 1.0 + 0; |))
-
-  end  
+    end
+  end
 end
