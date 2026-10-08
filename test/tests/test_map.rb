@@ -2,6 +2,74 @@ require 'test_helper'
 
 class TestMap < Test::Unit::TestCase
 
+  def test_that_equal_integer_and_float_keys_remain_distinct
+    run_test_as('programmer') do
+      ['1 -> 11, 1.0 -> 22', '1.0 -> 22, 1 -> 11'].each do |entries|
+        assert_equal [2, 11, 22, '{1, 1.0}'], simplify(command(%Q|; m = [#{entries}]; return {length(m), m[1], m[1.0], toliteral(mapkeys(m))};|))
+      end
+      assert_equal [1, 1, 1], simplify(command('; m = [0 -> 0, 1.0 -> 0, 1 -> 0]; return {maphaskey(m, 0), maphaskey(m, 1), maphaskey(m, 1.0)};'))
+    end
+  end
+
+  def test_that_mixed_numeric_key_operations_do_not_depend_on_insertion_order
+    run_test_as('programmer') do
+      [['0', '1.0', '1'], ['2', '#0', '1.0'], ['2', 'E_NONE', '1.0'], ['false', 'true', '0']].each do |keys|
+        keys.permutation.each do |order|
+          entries = order.map { |key| "#{key} -> #{keys.index(key) + 1}" }.join(', ')
+          checks = keys.each_with_index.map do |key, index|
+            "r = {@r, maphaskey(m, #{key}), m[#{key}]}; m[#{key}] = #{index + 11};"
+          end.join(' ')
+          checks += keys.each_with_index.map { |key, index| "r = {@r, m[#{key}]};" }.join(' ')
+          checks += keys.each_with_index.map do |key, index|
+            "m = mapdelete(m, #{key}); r = {@r, length(m), maphaskey(m, #{key})};"
+          end.join(' ')
+          assert_equal [3, 1, 1, 1, 2, 1, 3, 11, 12, 13, 2, 0, 1, 0, 0, 0],
+            simplify(command("; m = [#{entries}]; r = {length(m)}; #{checks} return r;")), order.inspect
+        end
+      end
+    end
+  end
+
+  def test_that_distinct_identity_keys_survive_all_insertion_orders
+    run_test_as('wizard') do
+      ['$waif:new()'].each do |factory|
+        ['a', 'b', '0'].permutation.each do |order|
+          entries = order.map { |key| "#{key} -> #{['a', 'b', '0'].index(key) + 1}" }.join(', ')
+          code = "a = #{factory}; b = #{factory}; m = [#{entries}]; r = {length(m), maphaskey(m, a), maphaskey(m, b), m[a], m[b], m[0]};"
+          code += 'm[a] = 11; m[b] = 22; r = {@r, length(m), m[a], m[b]};'
+          code += 'm = mapdelete(m, a); r = {@r, length(m), maphaskey(m, a), m[b], m[0]};'
+          code += 'm = mapdelete(m, b); return {@r, length(m), maphaskey(m, b), m[0]};'
+          assert_equal [3, 1, 1, 1, 2, 3, 3, 11, 22, 2, 0, 22, 3, 1, 0, 3], simplify(command("; #{code}")), "#{factory}: #{order.inspect}"
+        end
+      end
+    end
+  end
+
+  def test_that_distinct_anonymous_keys_support_indexing_and_updates
+    run_test_as('wizard') do
+      ['a', 'b', '0'].permutation.each do |order|
+        entries = order.map { |key| "#{key} -> #{['a', 'b', '0'].index(key) + 1}" }.join(', ')
+        code = "a = create({}, 1); b = create({}, 1); m = [#{entries}]; r = {length(m), m[a], m[b], m[0]};"
+        code += 'm[a] = 11; m[b] = 22; return {@r, length(m), m[a], m[b], m[0]};'
+        assert_equal [3, 1, 2, 3, 3, 11, 22, 3], simplify(command("; #{code}")), order.inspect
+      end
+    end
+  end
+
+  def test_that_numeric_key_extremes_preserve_every_typed_key
+    run_test_as('programmer') do
+      keys = options['64bit'] ?
+        ['-9223372036854775807', '-1', '0', '1', '9007199254740992', '9007199254740993', '9223372036854775807', '-1.0e300', '-1.0', '0.0', '1.0', '9007199254740992.0', '1.0e300'] :
+        ['-2147483648', '-1', '0', '1', '2147483647', '-1.0e300', '-1.0', '0.0', '1.0', '2147483647.0', '1.0e300']
+      [keys, keys.reverse, keys.rotate(3)].each do |order|
+        entries = order.map { |key| "#{key} -> #{keys.index(key) + 1}" }.join(', ')
+        checks = keys.each_with_index.map { |key, index| "r = {@r, maphaskey(m, #{key}), m[#{key}]};" }.join(' ')
+        expected = [keys.length] + keys.each_index.flat_map { |index| [1, index + 1] }
+        assert_equal expected, simplify(command("; m = [#{entries}]; r = {length(m)}; #{checks} return r;"))
+      end
+    end
+  end
+
   def test_that_literal_hash_notation_works
     run_test_as('programmer') do
       m1 = MooObj.new('#1')
@@ -152,9 +220,9 @@ class TestMap < Test::Unit::TestCase
       assert_equal E_TYPE, simplify(command(%Q(; x = []; x[[1 -> 2]] = 1;)))
       assert_equal E_TYPE, simplify(command(%Q(; x = []; x[{1, 2}] = 1;)))
       assert_equal E_TYPE, mapdelete({1 => 2, 3 => 4}, {})
-      assert_equal E_TYPE, mapdelete({1 => 2, 3 => 4}, [])
+      assert_equal({1 => 2, 3 => 4}, mapdelete({1 => 2, 3 => 4}, []))
       assert_equal E_TYPE, mapdelete({1 => 2, 3 => 4}, {1 => 2})
-      assert_equal E_TYPE, mapdelete({1 => 2, 3 => 4}, [1, 2])
+      assert_equal({3 => 4}, mapdelete({1 => 2, 3 => 4}, [1]))
     end
   end
 
