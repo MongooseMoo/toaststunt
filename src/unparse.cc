@@ -18,6 +18,8 @@
 #include <ctype.h>
 #include <stdio.h>
 
+#include <cmath>
+
 #include "ast.h"
 #include "config.h"
 #include "decompile.h"
@@ -348,11 +350,26 @@ list_prg(Stmt * program, int p, int i)
     unparse_stmt(program, 0);
 }
 
+/*
+ * A negative number is written with a leading `-', which the parser reads as
+ * unary minus, so as an operand it binds only as tightly as that does.
+ */
+static int
+operand_prec(Expr * expr)
+{
+    if (expr->kind == EXPR_VAR
+            && ((expr->e.var.type == TYPE_INT && expr->e.var.v.num < 0)
+                || (expr->e.var.type == TYPE_FLOAT
+                    && std::signbit(expr->e.var.v.fnum))))
+        return expr_prec[EXPR_NEGATE];
+    return expr_prec[expr->kind];
+}
+
 static void
 bracket_lt(Stream * str, enum Expr_Kind parent, Expr * child)
 {
     if ((fully_parenthesize && expr_prec[child->kind] < expr_prec[EXPR_PROP])
-            || expr_prec[parent] > expr_prec[child->kind]) {
+            || expr_prec[parent] > operand_prec(child)) {
         stream_add_char(str, '(');
         unparse_expr(str, child);
         stream_add_char(str, ')');
@@ -365,7 +382,7 @@ static void
 bracket_le(Stream * str, enum Expr_Kind parent, Expr * child)
 {
     if ((fully_parenthesize && expr_prec[child->kind] < expr_prec[EXPR_PROP])
-            || expr_prec[parent] >= expr_prec[child->kind]) {
+            || expr_prec[parent] >= operand_prec(child)) {
         stream_add_char(str, '(');
         unparse_expr(str, child);
         stream_add_char(str, ')');
@@ -632,7 +649,8 @@ unparse_expr(Stream * str, Expr * expr)
             } else {
                 bracket_lt(str, EXPR_PROP, expr->e.bin.lhs);
                 if (expr->e.bin.lhs->kind == EXPR_VAR
-                        && expr->e.bin.lhs->e.var.type == TYPE_INT)
+                        && expr->e.bin.lhs->e.var.type == TYPE_INT
+                        && expr->e.bin.lhs->e.var.v.num >= 0)
                     /* avoid parsing digits followed by dot as floating-point */
                     stream_add_char(str, ' ');
                 stream_add_char(str, '.');

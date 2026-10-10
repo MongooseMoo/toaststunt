@@ -264,8 +264,10 @@ class TestAst < Test::Unit::TestCase
 
   def test_that_an_ast_survives_a_round_trip
     run_test_as('programmer') do
-      code = value_ref(EVERYTHING)
-      assert_equal 1, evaluate("equal(parse_ast(unparse_ast(parse_ast(#{code}))), parse_ast(#{code}))")
+      [EVERYTHING, ['(-5):foo((-1).x, (-2.5)[1], -y:bar());']].each do |lines|
+        code = value_ref(lines)
+        assert_equal 1, evaluate("equal(parse_ast(unparse_ast(parse_ast(#{code}))), parse_ast(#{code}))")
+      end
     end
   end
 

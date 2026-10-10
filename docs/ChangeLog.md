@@ -28,6 +28,7 @@
 - Fixed an invalid free while parsing numeric verb prepositions.
 - Fixed waif self-reference detection to only identify actual self-references while traversing values.
 - In emergency mode, the wizard created for a completely empty database now owns itself instead of retaining an uninitialized owner.
+- Fixed `verb_code()` dropping the parentheses around a negative number used as the object of a property reference, verb call, index, or range. `(-5):foo()` was listed as `-5:foo()`, which compiles to the negation of `5:foo()`.
 
 ### New Features
 - Added `parse_ast()`, `verb_ast()`, `unparse_ast()`, and `validate_ast()`, which turn MOO code into a syntax tree of lists and maps and back again. See [Features/ast.md](Features/ast.md).
