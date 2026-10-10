@@ -28,3 +28,17 @@ To run the tests:
 
 9) Clean up the moo executable and the files created in /tmp:
     make clean
+
+Native map-key ordering regressions can run in an isolated Test.db process:
+
+    python3 test/run_map_order_regressions.py build/moo
+
+From the source root, test loading a checkpoint written by the old binary:
+
+    python3 test/run_map_order_regressions.py build/moo --reload-from /path/to/old/moo
+
+The reload test first proves lookup failures in the old runtime, then checks
+all stored numeric, boolean, waif and anonymous keys after two fixed-runtime
+reloads. It uses a temporary database and an ephemeral localhost port.
+Run the direct comparator invariant check with the command at the top of
+test/test_numeric_key_compare.cc after configuring the build with CMake.

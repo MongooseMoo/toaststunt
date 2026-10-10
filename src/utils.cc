@@ -445,12 +445,8 @@ compare(Var lhs, Var rhs, int case_matters)
                 panic_moo("COMPARE: Invalid value type");
         }
     }
-    if ((lhs.type == TYPE_FLOAT || rhs.type == TYPE_FLOAT) &&
-        (lhs.type == TYPE_INT || rhs.type == TYPE_INT)) {
-            const auto lhs_float = lhs.type == TYPE_FLOAT ? lhs.v.fnum : lhs.v.num;
-            const auto rhs_float = rhs.type == TYPE_FLOAT ? rhs.v.fnum : rhs.v.num;
-            return (lhs_float - rhs_float) < 0.0 ? -1 : 1;
-    }
+    // Map keys retain their types. Numeric promotion here would also conflict
+    // with the type ordering of object/error keys and break transitivity.
     return lhs.type - rhs.type;
 }
 
