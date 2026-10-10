@@ -954,7 +954,12 @@ bf_trunc(Var arglist, Byte next, void *vdata, Objid progr)
 {
     double d;
 
-    d = arglist.v.list[1].v.fnum;
+    #ifdef PROMOTE_NUMBERS
+    if (arglist.v.list[1].type == TYPE_INT)
+        d = (double)arglist.v.list[1].v.num;
+    else
+    #endif
+        d = arglist.v.list[1].v.fnum;
     errno = 0;
     if (d < 0.0)
         d = ceil(d);
@@ -1225,7 +1230,14 @@ bf_frandom(Var arglist, Byte next, void *vdata, Objid progr)
 static package
 bf_round(Var arglist, Byte next, void *vdata, Objid progr)
 {
-    double r = round((double)arglist.v.list[1].v.fnum);
+    double r;
+
+    #ifdef PROMOTE_NUMBERS
+    if (arglist.v.list[1].type == TYPE_INT)
+        r = (double)arglist.v.list[1].v.num;
+    else
+    #endif
+        r = round((double)arglist.v.list[1].v.fnum);
 
     free_var(arglist);
 
@@ -1389,7 +1401,11 @@ register_numbers(void)
     register_function("random", 0, 2, bf_random, TYPE_INT, TYPE_INT);
     register_function("reseed_random", 0, 0, bf_reseed_random);
     register_function("frandom", 1, 2, bf_frandom, TYPE_FLOAT, TYPE_FLOAT);
+#ifdef PROMOTE_NUMBERS
+    register_function("round", 1, 1, bf_round, TYPE_NUMERIC);
+#else
     register_function("round", 1, 1, bf_round, TYPE_FLOAT);
+#endif
     register_function("random_bytes", 1, 1, bf_random_bytes, TYPE_INT);
     register_function("time", 0, 0, bf_time);
     register_function("ctime", 0, 1, bf_ctime, TYPE_INT);
@@ -1444,7 +1460,11 @@ register_numbers(void)
     register_function("floor", 1, 1, bf_floor, TYPE_FLOAT);
 
     #endif
+#ifdef PROMOTE_NUMBERS
+    register_function("trunc", 1, 1, bf_trunc, TYPE_NUMERIC);
+#else
     register_function("trunc", 1, 1, bf_trunc, TYPE_FLOAT);
+#endif
 
     /* Possibly misplaced functions... */
     register_function("distance", 2, 2, bf_distance, TYPE_LIST, TYPE_LIST);
