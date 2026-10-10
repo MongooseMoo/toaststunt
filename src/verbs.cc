@@ -17,6 +17,7 @@
 
 #include <string.h>
 
+#include "ast_map.h"
 #include "config.h"
 #include "db.h"
 #include "execute.h"
@@ -501,6 +502,33 @@ bf_verb_code(Var arglist, Byte next, void *vdata, Objid progr)
 }
 
 static package
+bf_verb_ast(Var arglist, Byte next, void *vdata, Objid progr)
+{   /* (object, verb-desc) */
+    Var obj = arglist.v.list[1];
+    Var desc = arglist.v.list[2];
+    db_verb_handle h;
+    enum error e;
+
+    if (!obj.is_object()) {
+        free_var(arglist);
+        return make_error_pack(E_TYPE);
+    } else if ((e = validate_verb_descriptor(desc)) != E_NONE
+               || (e = E_INVARG, !is_valid(obj))) {
+        free_var(arglist);
+        return make_error_pack(e);
+    }
+    h = find_described_verb(obj, desc);
+    free_var(arglist);
+
+    if (!h.ptr)
+        return make_error_pack(E_VERBNF);
+    else if (!db_verb_allows(h, progr, VF_READ))
+        return make_error_pack(E_PERM);
+
+    return make_var_pack(program_to_ast(db_verb_program(h)));
+}
+
+static package
 bf_set_verb_code(Var arglist, Byte next, void *vdata, Objid progr)
 {   /* (object, verb-desc, code) */
     Var obj = arglist.v.list[1];
@@ -671,6 +699,8 @@ register_verbs(void)
                       TYPE_ANY, TYPE_ANY);
     register_function("verb_code", 2, 4, bf_verb_code,
                       TYPE_ANY, TYPE_ANY, TYPE_ANY, TYPE_ANY);
+    register_function("verb_ast", 2, 2, bf_verb_ast,
+                      TYPE_ANY, TYPE_ANY);
     register_function("set_verb_code", 3, 3, bf_set_verb_code,
                       TYPE_ANY, TYPE_ANY, TYPE_LIST);
     register_function("respond_to", 2, 2, bf_respond_to,

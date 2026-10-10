@@ -20,6 +20,7 @@
 
 #include <stdio.h>
 
+#include "ast.h"
 #include "config.h"
 #include "program.h"
 #include "structures.h"
@@ -29,6 +30,13 @@ typedef void (*Unparser_Receiver) (void *, const char *);
 extern void unparse_program(Program *, Unparser_Receiver, void *,
 			    int fully_parenthesize,
 			    int indent_lines, int f_index);
+
+/* Unparse a statement tree whose variable slots are named by `names'. */
+extern void unparse_stmts(Stmt *, const char **names, Unparser_Receiver,
+			  void *, int fully_parenthesize, int indent_lines);
+
+/* True if `name' can be written as a bare identifier in MOO code. */
+extern int ok_identifier(const char *name);
 
 extern void unparse_to_file(FILE * fp, Program *,
 			    int fully_parenthesize,
