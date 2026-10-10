@@ -120,4 +120,27 @@ class TestMath < Test::Unit::TestCase
       assert_equal 1.0, simplify(command(%Q|; return 1.0 + 0; |))
     end
   end
+
+  def test_builtin_promotion
+    run_test_as('programmer') do
+      assert_equal 2.0, simplify(command(%Q|; return sqrt(4); |))
+      assert_equal 2.0, simplify(command(%Q|; return cbrt(8); |))
+      assert_equal 0.0, simplify(command(%Q|; return sin(0); |))
+      assert_equal 1.0, simplify(command(%Q|; return cos(0); |))
+      assert_equal 1.0, simplify(command(%Q|; return exp(0); |))
+      assert_equal 0.0, simplify(command(%Q|; return log(1); |))
+      assert_equal 2.0, simplify(command(%Q|; return log10(100); |))
+      assert_equal 0.0, simplify(command(%Q|; return atan(0); |))
+      assert_equal 0.0, simplify(command(%Q|; return atan(0, 1); |))
+      assert_equal 0.0, simplify(command(%Q|; return atan2(0, 1); |))
+      assert_equal 0.0, simplify(command(%Q|; return atan2(0.0, 1); |))
+      assert_equal 4.0, simplify(command(%Q|; return ceil(4); |))
+      assert_equal 4.0, simplify(command(%Q|; return floor(4); |))
+      assert_equal -4.0, simplify(command(%Q|; return trunc(-4); |))
+      assert_equal 4.0, simplify(command(%Q|; return round(4); |))
+      assert_equal 2.0, simplify(command(%Q|; return sqrt(4.0); |))
+      assert_equal E_INVARG, simplify(command(%Q|; return sqrt(-1); |))
+      assert_equal E_TYPE, simplify(command(%Q|; return sqrt("4"); |))
+    end
+  end
 end
