@@ -21,7 +21,7 @@ To run the tests:
 6) Verify the settings in test.yml are accurate for your configuration.
 
 7) In one console/terminal/window, run the ToastStunt server in the test directory:
-    ./moo Test.db /dev/null 9898
+    ./moo Test.db /tmp/toast-test-out.db 9898
 
 8) In another console/terminal/window, run the tests:
     make
