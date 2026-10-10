@@ -127,23 +127,15 @@ Key configuration files:
 
 ## AST Implementation Notes
 
-### Key Debugging Discovery (August 2025)
+The MOO-visible behaviour and the node reference are in `docs/Features/ast.md`.
 
-**Critical Finding**: AST parse_ast() requires valid MOO code with recognized builtin functions.
+- `src/ast_map.cc` holds both conversions and `parse_ast()`, `unparse_ast()` and `validate_ast()`. `verb_ast()` is in `src/verbs.cc` beside `verb_code()`.
+- Code to tree: `parse_list_as_program()` then `decompile_program()`, the same tree `verb_code()` prints. There is no hook in the parser.
+- Tree to code: build `Stmt`/`Expr` nodes between `begin_code_allocation()` and `end_code_allocation()`, then call `unparse_stmts()` in `src/unparse.cc`. Do not write a second unparser.
+- A name that is not a built-in function is a compile error, so `parse_ast({"foo(42);"})` raises `E_INVARG`.
+- `test/tests/test_ast.rb` compares inside the server with `equal()`, which is exact about case and map contents.
 
-During AST implementation debugging, discovered that:
-- ✅ Parser callback mechanism works perfectly for valid MOO code
-- ❌ Unknown function names (like `foo()`) cause complete parse failure
-- ❌ Parse failures return NULL, so AST callback never triggers
-- ✅ Valid builtins (like `length()`, `typeof()`) parse successfully and trigger AST capture
-
-**Test Requirements**: Always use valid ToastStunt builtin functions in AST tests:
-- ✅ Good: `parse_ast({"length({1,2,3});"})` 
-- ❌ Bad: `parse_ast({"foo(42);"})` - fails because `foo` unknown
-- ✅ Good: `parse_ast({"return 42;"})` - statements work fine
-- ✅ Good: `parse_ast({"x = 1;"})` - assignments work fine
-
-**Error Debugging**: Use errlog() for ToastStunt logging, not printf(). Parser errors appear in server logs when parsing fails with detailed error messages.
+**Error Debugging**: Use errlog() for ToastStunt logging, not printf().
 
 ### Ruby Unit Test Framework
 
@@ -152,25 +144,3 @@ During AST implementation debugging, discovered that:
 **MOO Integration**: Use `run_test_as("wizard") do ... end` to wrap MOO interactions. The `command()` function sends MOO code and returns string results - MOO formatted like `{1, [MAP]}` are strings, not Ruby arrays.
 
 **Test Runner**: Use `./run_tests.sh test_name` - it handles server start/stop automatically. Don't write separate scripts - use the existing test infrastructure.
-
-## AST Unparsing Architecture Rules
-
-**CRITICAL: NEVER IMPLEMENT CUSTOM UNPARSING**
-
-- **Only implement**: MAP↔Expr/Stmt conversion functions (`map_to_stmt`, `stmt_to_map`, etc.)
-- **Use existing**: MOO's `unparse_program()` infrastructure for Stmt→code conversion
-- **Never write**: Custom statement-to-string functions, stream capture, or parallel unparsing logic
-- **Why**: MOO already has complete, working unparsing. Reimplementing creates broken duplicates.
-
-**The correct bf_unparse_ast() pattern:**
-1. `map_to_stmt()` - convert MAP to Stmt (custom code)
-2. `list_prg(stmt, 0, 0)` - convert Stmt to code lines (existing MOO infrastructure)
-3. Return the code lines
-
-**KEY FUNCTION: `list_prg(stmt, fully_parenthesize, indent_lines)`**
-- Located in unparse.cc line 862
-- Takes Stmt directly (no need for unparse_program)
-- Uses global receiver pattern to output lines
-- This is THE function to call for Stmt→code conversion
-
-**NEVER create custom unparsing functions again. Use list_prg().**

@@ -452,6 +452,40 @@ class TestAst < Test::Unit::TestCase
     end
   end
 
+  # The example in docs/Features/ast.md.
+  def test_that_a_verb_can_walk_a_tree
+    run_test_as('programmer') do
+      o = create(:nothing)
+      add_verb(o, [player, 'xd', 'calls'], ['this', 'none', 'this'])
+      set_verb_code(o, 'calls') do |vc|
+        vc << '{object, name} = args;'
+        vc << 'calls = {};'
+        vc << 'todo = verb_ast(object, name);'
+        vc << 'while (todo)'
+        vc << '  node = todo[1];'
+        vc << '  todo = listdelete(todo, 1);'
+        vc << '  if (typeof(node) == LIST)'
+        vc << '    todo = {@node, @todo};'
+        vc << '  elseif (typeof(node) == MAP)'
+        vc << '    if (`node["type"] ! E_RANGE\' == "call")'
+        vc << '      calls = setadd(calls, node["function"]);'
+        vc << '    endif'
+        vc << '    todo = {@mapvalues(node), @todo};'
+        vc << '  endif'
+        vc << 'endwhile'
+        vc << 'return calls;'
+      end
+      add_verb(o, [player, 'xd', 'subject'], ['this', 'none', 'this'])
+      set_verb_code(o, 'subject') do |vc|
+        vc << 'if (length(args) > 1)'
+        vc << '  return tostr(@args, time());'
+        vc << 'endif'
+        vc << 'x = `toint(args[1]) ! ANY => length("")\';'
+      end
+      assert_equal 1, evaluate(%Q|equal(sort(#{o}:calls(#{o}, "subject")), {"length", "time", "toint", "tostr"}) \|\| toliteral(#{o}:calls(#{o}, "subject"))|)
+    end
+  end
+
   def test_that_an_ast_cannot_nest_too_deeply
     run_test_as('programmer') do
       nest = %Q|e = #{lit 1}; for i in [1..%d] e = ["type" -> "unary", "op" -> "!", "expr" -> e]; endfor ast = {["type" -> "expr", "expr" -> e]};|

@@ -4,8 +4,8 @@
   verbs.cc with the other verb built-ins.
 
   A program is a LIST of statement nodes.  A node is a MAP holding a "type"
-  string and the fields of that type; docs/Features/new_builtins.md lists
-  them.  Variables appear by name, so a tree can be written by hand.
+  string and the fields of that type; docs/Features/ast.md lists them.
+  Variables appear by name, so a tree can be written by hand.
 
   Trees come from the decompiler, which is also what verb_code() prints, and
   go back to code through the ordinary unparser.

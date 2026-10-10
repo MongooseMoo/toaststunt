@@ -27,3 +27,4 @@
     - connection_info (show detailed information about a particular connection)
     - parse_ansi (parses color tags into their ANSI equivalents)
     - remove_ansi (strips ANSI tags from strings)
+    - parse_ast, verb_ast, unparse_ast, validate_ast (read and write MOO code as syntax trees; see [ast.md](ast.md))
