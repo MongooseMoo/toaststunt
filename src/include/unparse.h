@@ -20,17 +20,23 @@
 
 #include <stdio.h>
 
+#include "ast.h"
 #include "config.h"
 #include "program.h"
 #include "structures.h"
-#include "ast.h"
-#include "ast_map.h"
 
 typedef void (*Unparser_Receiver) (void *, const char *);
 
 extern void unparse_program(Program *, Unparser_Receiver, void *,
 			    int fully_parenthesize,
 			    int indent_lines, int f_index);
+
+/* Unparse a statement tree whose variable slots are named by `names'. */
+extern void unparse_stmts(Stmt *, const char **names, Unparser_Receiver,
+			  void *, int fully_parenthesize, int indent_lines);
+
+/* True if `name' can be written as a bare identifier in MOO code. */
+extern int ok_identifier(const char *name);
 
 extern void unparse_to_file(FILE * fp, Program *,
 			    int fully_parenthesize,
@@ -43,8 +49,5 @@ extern const char *unparse_error(enum error);	/* E_NONE -> "No error" */
 
 extern int parse_error(const char *error);	/* "E_NONE" -> E_NONE */
 extern const char* parse_type(var_type);
-
-extern char *unparse_expr_to_string(Expr *expr, Symtab *symtab);
-extern char *unparse_stmt_to_string(Stmt *stmt, Symtab *symtab);
 
 #endif

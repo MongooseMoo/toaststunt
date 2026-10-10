@@ -1,2048 +1,1435 @@
 /******************************************************************************
-  ToastStunt AST Map Converter
-  
-  This module provides conversion between AST nodes and MOO Var (LIST/MAP) representations.
-  Implements the visitor pattern for type-safe AST traversal and conversion.
-  
-  Functions:
-  - expr_to_map(Expr *expr, Symtab *symtab) -> Var MAP
-  - stmt_to_map(Stmt *stmt, Symtab *symtab) -> Var MAP  
-  - map_to_expr(Var map, Symtab *symtab) -> Expr*
-  - map_to_stmt(Var map, Symtab *symtab) -> Stmt*
-  
-  Schema Version: 1 (using typed schema with lowercase keys)
-  Memory: All Expr/Stmt pointers allocated in AST pool, Var results use MOO GC
+  Syntax trees as MOO values, and the built-in functions that expose them:
+  parse_ast(), unparse_ast() and validate_ast().  verb_ast() lives in
+  verbs.cc with the other verb built-ins.
+
+  A program is a LIST of statement nodes.  A node is a MAP holding a "type"
+  string and the fields of that type; docs/Features/new_builtins.md lists
+  them.  Variables appear by name, so a tree can be written by hand.
+
+  Trees come from the decompiler, which is also what verb_code() prints, and
+  go back to code through the ordinary unparser.
  *****************************************************************************/
 
-#include "ast_map.h"
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+#include <string>
+
 #include "ast.h"
+#include "ast_map.h"
+#include "bf_register.h"
+#include "decompile.h"
 #include "functions.h"
 #include "list.h"
 #include "log.h"
 #include "map.h"
 #include "parser.h"
+#include "program.h"
+#include "server.h"
 #include "storage.h"
-#include "streams.h"
 #include "structures.h"
+#include "sym_table.h"
 #include "unparse.h"
 #include "utils.h"
 #include "version.h"
 
-// Forward declarations
+/* A tree handed to us from MOO code may not nest deeper than this. */
+#define AST_MAX_DEPTH 1000
 
-// AST Schema Version - increment when breaking changes occur
-static const int AST_SCHEMA_VERSION = 1;
+/*
+ * Field names and node types.  Each is one shared string, created when the
+ * built-ins are registered.
+ */
+#define AST_STRINGS(S)							\
+    S(type) S(op) S(lhs) S(rhs) S(expr) S(value) S(name) S(var) S(index)	\
+    S(object) S(property) S(verb) S(function) S(args) S(base) S(from)	\
+    S(to) S(target) S(items) S(entries) S(key) S(condition)		\
+    S(consequent) S(alternate) S(codes) S(default) S(kind) S(required)	\
+    S(optional) S(rest) S(arms) S(body) S(else) S(excepts) S(finally)	\
+    S(delay)								\
+    S(literal) S(variable) S(binary) S(unary) S(prop) S(verb_call)	\
+    S(range) S(assign) S(scatter) S(call) S(list) S(map) S(conditional)	\
+    S(catch) S(first) S(last) S(splice)					\
+    S(if) S(for) S(for_range) S(while) S(fork) S(return) S(try_except)	\
+    S(try_finally) S(break) S(continue)
 
-// External parser globals 
-extern void *parser_data;
-extern Parser_Client parser_client;
+#define DECLARE_STRING(s) static Var S_##s;
+AST_STRINGS(DECLARE_STRING)
+#undef DECLARE_STRING
 
-// Parser state structure (from parser.y)
-struct parser_state {
-    Var         code;           /* a list of strings */
-    int         cur_string;     /* which string? */
-    int         cur_char;       /* which character in that string? */
-    Var         errors;         /* a list of strings */
+static const struct {
+    enum Expr_Kind kind;
+    int arity;
+    const char *op;
+} operators[] = {
+    {EXPR_PLUS, 2, "+"},
+    {EXPR_MINUS, 2, "-"},
+    {EXPR_TIMES, 2, "*"},
+    {EXPR_DIVIDE, 2, "/"},
+    {EXPR_MOD, 2, "%"},
+    {EXPR_EXP, 2, "^"},
+    {EXPR_AND, 2, "&&"},
+    {EXPR_OR, 2, "||"},
+    {EXPR_EQ, 2, "=="},
+    {EXPR_NE, 2, "!="},
+    {EXPR_LT, 2, "<"},
+    {EXPR_LE, 2, "<="},
+    {EXPR_GT, 2, ">"},
+    {EXPR_GE, 2, ">="},
+    {EXPR_IN, 2, "in"},
+    {EXPR_BITOR, 2, "|."},
+    {EXPR_BITAND, 2, "&."},
+    {EXPR_BITXOR, 2, "^."},
+    {EXPR_BITSHL, 2, "<<"},
+    {EXPR_BITSHR, 2, ">>"},
+    {EXPR_NEGATE, 1, "-"},
+    {EXPR_NOT, 1, "!"},
+    {EXPR_COMPLEMENT, 1, "~"}
 };
 
-// Standard schema field names (lowercase for consistency)
-static const char *FIELD_TYPE = "type";
-static const char *FIELD_VERSION = "ast_version";
-static const char *FIELD_SYMTAB = "variables";
+/* Indexed by Expr_Kind; the arity is 0 for anything but an operator. */
+static int operator_arity[SizeOf_Expr_Kind];
+static Var operator_name[SizeOf_Expr_Kind];
 
-// Size constants for arrays (match enum sizes)
-static const int SizeOf_Stmt_Kind = 11; // STMT_COND through STMT_CONTINUE
+/********** syntax tree to value **********/
 
-// Expression type strings (must match enum Expr_Kind order)
-static const char *expr_type_names[SizeOf_Expr_Kind] = {
-    "var",        // EXPR_VAR      (0)
-    "id",         // EXPR_ID       (1)
-    "prop",       // EXPR_PROP     (2)
-    "verb",       // EXPR_VERB     (3)
-    "index",      // EXPR_INDEX    (4)
-    "range",      // EXPR_RANGE    (5)
-    "asgn",       // EXPR_ASGN     (6)
-    "call",       // EXPR_CALL     (7)
-    "plus",       // EXPR_PLUS     (8)
-    "minus",      // EXPR_MINUS    (9)
-    "times",      // EXPR_TIMES    (10)
-    "divide",     // EXPR_DIVIDE   (11)
-    "mod",        // EXPR_MOD      (12)
-    "exp",        // EXPR_EXP      (13)
-    "negate",     // EXPR_NEGATE   (14)
-    "and",        // EXPR_AND      (15)
-    "or",         // EXPR_OR       (16)
-    "not",        // EXPR_NOT      (17)
-    "eq",         // EXPR_EQ       (18)
-    "ne",         // EXPR_NE       (19)
-    "lt",         // EXPR_LT       (20)
-    "le",         // EXPR_LE       (21)
-    "gt",         // EXPR_GT       (22)
-    "ge",         // EXPR_GE       (23)
-    "in",         // EXPR_IN       (24)
-    "list",       // EXPR_LIST     (25)
-    "cond",       // EXPR_COND     (26)
-    "catch",      // EXPR_CATCH    (27)
-    "length",     // EXPR_LENGTH   (28) - retired
-    "scatter",    // EXPR_SCATTER  (29)
-    "map",        // EXPR_MAP      (30)
-    "first",      // EXPR_FIRST    (31)
-    "last",       // EXPR_LAST     (32)
-    "bitor",      // EXPR_BITOR    (33)
-    "bitand",     // EXPR_BITAND   (34)
-    "bitxor",     // EXPR_BITXOR   (35)
-    "bitshl",     // EXPR_BITSHL   (36)
-    "bitshr",     // EXPR_BITSHR   (37)
-    "complement"  // EXPR_COMPLEMENT (38)
-};
+static Var expr_to_var(Expr * expr, const char **names);
+static Var stmts_to_var(Stmt * stmt, const char **names);
 
-// Statement type strings (must match enum Stmt_Kind order)  
-static const char *stmt_type_names[SizeOf_Stmt_Kind] = {
-    "cond",       // STMT_COND
-    "list",       // STMT_LIST
-    "range",      // STMT_RANGE
-    "while",      // STMT_WHILE
-    "fork",       // STMT_FORK
-    "expr",       // STMT_EXPR
-    "return",     // STMT_RETURN
-    "try_except", // STMT_TRY_EXCEPT
-    "try_finally",// STMT_TRY_FINALLY
-    "break",      // STMT_BREAK
-    "continue"    // STMT_CONTINUE
-};
+static Var
+new_node(Var type)
+{
+    return mapinsert(new_map(), var_ref(S_type), var_ref(type));
+}
 
-/*********** Symbol Table Management ***********/
+static Var
+put(Var map, Var key, Var value)
+{   /* consumes `map' and `value' */
+    return mapinsert(map, var_ref(key), value);
+}
 
-// Convert symbol table to MOO LIST of STRs for serialization
-static Var symtab_to_list(Symtab *symtab) {
-    if (!symtab || symtab->num_names == 0) {
-        return new_list(0);
-    }
-    
-    Var list = new_list(symtab->num_names);
-    for (int i = 0; i < symtab->num_names; i++) {
-        list.v.list[i + 1].type = TYPE_STR;
-        list.v.list[i + 1].v.str = str_ref(symtab->names[i]);
+static Var
+put_name(Var map, Var key, const char **names, int id)
+{
+    return put(map, key, str_ref_to_var(names[id]));
+}
+
+static Var
+args_to_var(Arg_List * args, const char **names)
+{
+    Arg_List *arg;
+    Var list;
+    int n = 0;
+
+    for (arg = args; arg; arg = arg->next)
+        n++;
+    list = new_list(n);
+    for (arg = args, n = 0; arg; arg = arg->next) {
+        Var item = expr_to_var(arg->expr, names);
+
+        if (arg->kind == ARG_SPLICE)
+            item = put(new_node(S_splice), S_expr, item);
+        list.v.list[++n] = item;
     }
     return list;
 }
 
-// Convert LIST back to Symtab
-static Symtab *list_to_symtab(Var list) {
-    if (list.type != TYPE_LIST) {
-        return create_symtab(0); // Return empty symtab on error
+static Var
+map_list_to_var(Map_List * entries, const char **names)
+{
+    Map_List *entry;
+    Var list;
+    int n = 0;
+
+    for (entry = entries; entry; entry = entry->next)
+        n++;
+    list = new_list(n);
+    for (entry = entries, n = 0; entry; entry = entry->next) {
+        Var item = new_map();
+
+        item = put(item, S_key, expr_to_var(entry->key, names));
+        item = put(item, S_value, expr_to_var(entry->value, names));
+        list.v.list[++n] = item;
     }
-    
-    int num_names = list.v.list[0].v.num;
-    Symtab *symtab = create_symtab(num_names);
-    
-    for (int i = 0; i < num_names; i++) {
-        if (list.v.list[i + 1].type == TYPE_STR) {
-            symtab->names[i] = str_dup(list.v.list[i + 1].v.str);
-        } else {
-            symtab->names[i] = str_dup(""); // Fallback for invalid entries
-        }
-    }
-    
-    return symtab;
+    return list;
 }
 
-// Extract symbol table from AST MAP
-static Symtab *extract_symtab_from_map(Var map) {
-    Var symtab_var;
-    if (maplookup(map, str_dup_to_var(FIELD_SYMTAB), &symtab_var, 0) == nullptr) {
-        return create_symtab(0); // No symtab field, return empty
+static Var
+scatter_to_var(Scatter * scatter, const char **names)
+{
+    Scatter *sc;
+    Var list;
+    int n = 0;
+
+    for (sc = scatter; sc; sc = sc->next)
+        n++;
+    list = new_list(n);
+    for (sc = scatter, n = 0; sc; sc = sc->next) {
+        Var item = new_map();
+
+        item = put(item, S_kind, var_ref(sc->kind == SCAT_REQUIRED ? S_required
+                                         : sc->kind == SCAT_OPTIONAL ? S_optional
+                                         : S_rest));
+        item = put_name(item, S_var, names, sc->id);
+        if (sc->expr)
+            item = put(item, S_default, expr_to_var(sc->expr, names));
+        list.v.list[++n] = item;
     }
-    
-    return list_to_symtab(symtab_var);
+    return list;
 }
 
+static Var
+expr_to_var(Expr * expr, const char **names)
+{
+    Var node;
 
-/*********** Validation Helpers ***********/
-
-// Validate MAP has required type field with expected value
-static int validate_type_field(Var map, const char *expected_type) {
-    if (map.type != TYPE_MAP) {
-        return 0;
-    }
-    
-    Var type_field;
-    if (maplookup(map, str_dup_to_var(FIELD_TYPE), &type_field, 0) == nullptr) {
-        return 0;
-    }
-    if (type_field.type != TYPE_STR) {
-        return 0;
-    }
-    
-    return strcmp(type_field.v.str, expected_type) == 0;
-}
-
-// Validate and extract AST version from MAP
-static int validate_version(Var map) {
-    if (map.type != TYPE_MAP) {
-        return 0;
-    }
-    
-    Var version_field;
-    if (maplookup(map, str_dup_to_var(FIELD_VERSION), &version_field, 0) == nullptr) {
-        return 0;
-    }
-    if (version_field.type != TYPE_INT) {
-        return 0;
-    }
-    
-    return version_field.v.num == AST_SCHEMA_VERSION;
-}
-
-/*********** Expression Conversion: AST → MAP ***********/
-
-static Var expr_to_map_visitor(Expr *expr, Symtab *symtab);
-static Var arg_list_to_list(Arg_List *args, Symtab *symtab);
-static Arg_List *list_to_arg_list(Var list, Symtab *symtab);
-static Var scatter_to_list(Scatter *scatter, Symtab *symtab);
-static Scatter *list_to_scatter(Var list, Symtab *symtab);
-
-// Convert literal Var to MAP representation
-static Var var_literal_to_map(Var literal) {
-    Var result = new_map();
-    
-    // Set type field
-    result = mapinsert(result, str_dup_to_var(FIELD_TYPE), str_dup_to_var("literal"));
-    
-    // Set value based on type
-    switch (literal.type) {
-        case TYPE_INT:
-            result = mapinsert(result, str_dup_to_var("value_type"), str_dup_to_var("int"));
-            result = mapinsert(result, str_dup_to_var("value"), var_ref(literal));
-            break;
-        case TYPE_FLOAT:
-            result = mapinsert(result, str_dup_to_var("value_type"), str_dup_to_var("float"));
-            result = mapinsert(result, str_dup_to_var("value"), var_ref(literal));
-            break;
-        case TYPE_STR:
-            result = mapinsert(result, str_dup_to_var("value_type"), str_dup_to_var("str"));
-            result = mapinsert(result, str_dup_to_var("value"), var_ref(literal));
-            break;
-        case TYPE_OBJ:
-            result = mapinsert(result, str_dup_to_var("value_type"), str_dup_to_var("obj"));
-            result = mapinsert(result, str_dup_to_var("value"), var_ref(literal));
-            break;
-        case TYPE_ERR:
-            result = mapinsert(result, str_dup_to_var("value_type"), str_dup_to_var("err"));
-            result = mapinsert(result, str_dup_to_var("value"), var_ref(literal));
-            break;
-        default:
-            // Unsupported literal type
-            result = mapinsert(result, str_dup_to_var("value_type"), str_dup_to_var("unknown"));
-            result = mapinsert(result, str_dup_to_var("value"), var_ref(zero));
-            break;
-    }
-    
-    return result;
-}
-
-// Convert identifier to MAP representation  
-static Var id_to_map(int id, Symtab *symtab) {
-    Var result = new_map();
-    
-    result = mapinsert(result, str_dup_to_var(FIELD_TYPE), str_dup_to_var("identifier"));
-    result = mapinsert(result, str_dup_to_var("id"), Var::new_int(id));
-    
-    // Include variable name if symbol table available
-    if (symtab && id >= 0 && id < symtab->num_names) {
-        result = mapinsert(result, str_dup_to_var("name"), str_dup_to_var(symtab->names[id]));
-    }
-    
-    return result;
-}
-
-// Main expression visitor function
-static Var expr_to_map_visitor(Expr *expr, Symtab *symtab) {
-    if (!expr) {
-        return var_ref(zero); // Null expression
-    }
-    
-    Var result = new_map();
-    
-    // Set type field based on expression kind
-    if (expr->kind >= 0 && expr->kind < SizeOf_Expr_Kind) {
-        result = mapinsert(result, str_dup_to_var(FIELD_TYPE), 
-                           str_dup_to_var(expr_type_names[expr->kind]));
-    } else {
-        result = mapinsert(result, str_dup_to_var(FIELD_TYPE), str_dup_to_var("unknown"));
-        return result;
-    }
-    
-    // Convert fields based on expression type
     switch (expr->kind) {
         case EXPR_VAR:
-            // Literal value
-            free_var(result);
-            return var_literal_to_map(expr->e.var);
-            
+            return put(new_node(S_literal), S_value, var_ref(expr->e.var));
+
         case EXPR_ID:
-            // Variable identifier
-            free_var(result);
-            return id_to_map(expr->e.id, symtab);
-            
-        case EXPR_ASGN:
-            // Assignment: lhs = rhs
-            result = mapinsert(result, str_dup_to_var("lhs"), 
-                               expr_to_map_visitor(expr->e.bin.lhs, symtab));
-            result = mapinsert(result, str_dup_to_var("rhs"), 
-                               expr_to_map_visitor(expr->e.bin.rhs, symtab));
-            break;
-            
+            return put_name(new_node(S_variable), S_name, names, expr->e.id);
+
         case EXPR_PROP:
-            // Property access: obj.prop
-            result = mapinsert(result, str_dup_to_var("obj"), 
-                               expr_to_map_visitor(expr->e.bin.lhs, symtab));
-            result = mapinsert(result, str_dup_to_var("prop"), 
-                               expr_to_map_visitor(expr->e.bin.rhs, symtab));
-            break;
-            
+            node = new_node(S_prop);
+            node = put(node, S_object, expr_to_var(expr->e.bin.lhs, names));
+            return put(node, S_property, expr_to_var(expr->e.bin.rhs, names));
+
         case EXPR_VERB:
-            // Verb call: obj:verb(args)
-            result = mapinsert(result, str_dup_to_var("obj"), 
-                               expr_to_map_visitor(expr->e.verb.obj, symtab));
-            result = mapinsert(result, str_dup_to_var("verb"), 
-                               expr_to_map_visitor(expr->e.verb.verb, symtab));
-            
-            // Convert arguments list to MAP format
-            if (expr->e.verb.args) {
-                Var args_list = new_list(0);
-                for (Arg_List *arg = expr->e.verb.args; arg != nullptr; arg = arg->next) {
-                    Var arg_map = new_map();
-                    arg_map = mapinsert(arg_map, str_dup_to_var("expr"), 
-                                       expr_to_map_visitor(arg->expr, symtab));
-                    arg_map = mapinsert(arg_map, str_dup_to_var("kind"), 
-                                       str_dup_to_var(arg->kind == ARG_NORMAL ? "normal" : "splice"));
-                    args_list = listappend(args_list, arg_map);
-                }
-                result = mapinsert(result, str_dup_to_var("args"), args_list);
-            }
-            break;
-            
-        case EXPR_CALL:
-            // Function call: func(args)
-            result = mapinsert(result, str_dup_to_var("func"), 
-                               str_dup_to_var(name_func_by_num(expr->e.call.func)));
-            // Convert arguments list using existing Arg_List conversion
-            if (expr->e.call.args) {
-                result = mapinsert(result, str_dup_to_var("args"), 
-                                   arg_list_to_list(expr->e.call.args, symtab));
-            }
-            break;
-            
-        // Binary operators (use same pattern)
+            node = new_node(S_verb_call);
+            node = put(node, S_object, expr_to_var(expr->e.verb.obj, names));
+            node = put(node, S_verb, expr_to_var(expr->e.verb.verb, names));
+            return put(node, S_args, args_to_var(expr->e.verb.args, names));
+
         case EXPR_INDEX:
-        case EXPR_PLUS:
-        case EXPR_MINUS:
-        case EXPR_TIMES:
-        case EXPR_DIVIDE:
-        case EXPR_MOD:
-        case EXPR_EXP:
-        case EXPR_EQ:
-        case EXPR_NE:
-        case EXPR_LT:
-        case EXPR_LE:
-        case EXPR_GT:
-        case EXPR_GE:
-        case EXPR_IN:
-        case EXPR_AND:
-        case EXPR_OR:
-        case EXPR_BITOR:
-        case EXPR_BITAND:
-        case EXPR_BITXOR:
-        case EXPR_BITSHL:
-        case EXPR_BITSHR:
-            result = mapinsert(result, str_dup_to_var("lhs"), 
-                               expr_to_map_visitor(expr->e.bin.lhs, symtab));
-            result = mapinsert(result, str_dup_to_var("rhs"), 
-                               expr_to_map_visitor(expr->e.bin.rhs, symtab));
-            break;
-            
-        // Unary operators
-        case EXPR_NOT:
-        case EXPR_NEGATE:
-        case EXPR_COMPLEMENT:
-            result = mapinsert(result, str_dup_to_var("expr"), 
-                               expr_to_map_visitor(expr->e.expr, symtab));
-            break;
-            
-        case EXPR_COND:
-            // Conditional: condition ? consequent | alternate
-            result = mapinsert(result, str_dup_to_var("condition"), 
-                               expr_to_map_visitor(expr->e.cond.condition, symtab));
-            result = mapinsert(result, str_dup_to_var("consequent"), 
-                               expr_to_map_visitor(expr->e.cond.consequent, symtab));
-            result = mapinsert(result, str_dup_to_var("alternate"), 
-                               expr_to_map_visitor(expr->e.cond.alternate, symtab));
-            break;
-            
-        case EXPR_LIST:
-            // List literal: {expr1, expr2, ...}
-            if (expr->e.list) {
-                Var elements = new_list(0);
-                int count = 0;
-                for (Arg_List *arg = expr->e.list; arg; arg = arg->next) {
-                    count++;
-                    Var element = new_map();
-                    element = mapinsert(element, str_dup_to_var("kind"), 
-                                        str_dup_to_var(arg->kind == ARG_SPLICE ? "splice" : "normal"));
-                    element = mapinsert(element, str_dup_to_var("expr"), 
-                                        expr_to_map_visitor(arg->expr, symtab));
-                    elements = listinsert(elements, element, count);
-                }
-                result = mapinsert(result, str_dup_to_var("elements"), elements);
-            }
-            break;
-            
+            node = new_node(S_index);
+            node = put(node, S_base, expr_to_var(expr->e.bin.lhs, names));
+            return put(node, S_index, expr_to_var(expr->e.bin.rhs, names));
+
         case EXPR_RANGE:
-            // Range expression: base[from..to] or [from..to]
-            result = mapinsert(result, str_dup_to_var("from"), 
-                               expr_to_map_visitor(expr->e.range.from, symtab));
-            result = mapinsert(result, str_dup_to_var("to"), 
-                               expr_to_map_visitor(expr->e.range.to, symtab));
-            // Only include base if it exists (for indexed ranges like obj[1..3])
-            if (expr->e.range.base) {
-                result = mapinsert(result, str_dup_to_var("base"), 
-                                   expr_to_map_visitor(expr->e.range.base, symtab));
-            }
-            break;
-            
-        case EXPR_MAP:
-            // Map literal: ["key" -> value, "k2" -> v2, ...]
-            if (expr->e.map) {
-                Var elements = new_list(0);
-                int count = 0;
-                for (Map_List *entry = expr->e.map; entry; entry = entry->next) {
-                    count++;
-                    Var element = new_map();
-                    element = mapinsert(element, str_dup_to_var("key"), 
-                                        expr_to_map_visitor(entry->key, symtab));
-                    element = mapinsert(element, str_dup_to_var("value"), 
-                                        expr_to_map_visitor(entry->value, symtab));
-                    elements = listinsert(elements, element, count);
-                }
-                result = mapinsert(result, str_dup_to_var("elements"), elements);
-            }
-            break;
-            
-        case EXPR_FIRST:
-        case EXPR_LAST:
-            // Nullary operators: ^ and $ (no sub-expressions)
-            // No additional fields needed beyond type
-            break;
-            
-        case EXPR_CATCH:
-            // Catch expression: try_expr ! (codes) => except_expr
-            result = mapinsert(result, str_dup_to_var("try"), 
-                               expr_to_map_visitor(expr->e._catch._try, symtab));
-            if (expr->e._catch.codes) {
-                result = mapinsert(result, str_dup_to_var("codes"), 
-                                   arg_list_to_list(expr->e._catch.codes, symtab));
-            }
-            result = mapinsert(result, str_dup_to_var("except"), 
-                               expr_to_map_visitor(expr->e._catch.except, symtab));
-            break;
-            
-        case EXPR_SCATTER:
-            // Scatter expression: {a, ?b=default, @rest}
-            if (expr->e.scatter) {
-                result = mapinsert(result, str_dup_to_var("elements"), 
-                                   scatter_to_list(expr->e.scatter, symtab));
-            }
-            break;
-            
-        // TODO: Implement remaining expression types
-        default:
-            // Mark as unimplemented for now
-            result = mapinsert(result, str_dup_to_var("_unimplemented"), Var::new_int(1));
-            break;
-    }
-    
-    return result;
-}
+            node = new_node(S_range);
+            node = put(node, S_base, expr_to_var(expr->e.range.base, names));
+            node = put(node, S_from, expr_to_var(expr->e.range.from, names));
+            return put(node, S_to, expr_to_var(expr->e.range.to, names));
 
-/*********** Public Interface Functions ***********/
-
-Var expr_to_map(Expr *expr, Symtab *symtab) {
-    if (!expr) {
-        return var_ref(zero);
-    }
-    
-    Var result = expr_to_map_visitor(expr, symtab);
-    
-    // Add version and symbol table to top-level
-    result = mapinsert(result, str_dup_to_var(FIELD_VERSION), Var::new_int(AST_SCHEMA_VERSION));
-    if (symtab) {
-        result = mapinsert(result, str_dup_to_var(FIELD_SYMTAB), symtab_to_list(symtab));
-    }
-    
-    return result;
-}
-
-// Statement visitor function
-static Var stmt_to_map_visitor(Stmt *stmt, Symtab *symtab) {
-    if (!stmt) {
-        return var_ref(zero); // Null statement
-    }
-    
-    Var result = new_map();
-    
-    // Set type field based on statement kind
-    if (stmt->kind >= 0 && stmt->kind < SizeOf_Stmt_Kind) {
-        result = mapinsert(result, str_dup_to_var(FIELD_TYPE), 
-                           str_dup_to_var(stmt_type_names[stmt->kind]));
-    } else {
-        result = mapinsert(result, str_dup_to_var(FIELD_TYPE), str_dup_to_var("unknown"));
-        return result;
-    }
-    
-    // Convert fields based on statement type
-    switch (stmt->kind) {
-        case STMT_COND: {
-            // Conditional statement: if/elseif/else
-            Var arms_list = new_list(0);
-            
-            // Convert each condition arm
-            for (Cond_Arm *arm = stmt->s.cond.arms; arm != nullptr; arm = arm->next) {
-                Var arm_map = new_map();
-                arm_map = mapinsert(arm_map, str_dup_to_var("condition"), 
-                                   expr_to_map_visitor(arm->condition, symtab));
-                arm_map = mapinsert(arm_map, str_dup_to_var("stmt"), 
-                                   stmt_to_map_visitor(arm->stmt, symtab));
-                arms_list = listappend(arms_list, arm_map);
-            }
-            result = mapinsert(result, str_dup_to_var("arms"), arms_list);
-            
-            // Convert otherwise clause if present
-            if (stmt->s.cond.otherwise) {
-                result = mapinsert(result, str_dup_to_var("otherwise"), 
-                                   stmt_to_map_visitor(stmt->s.cond.otherwise, symtab));
-            }
-            break;
-        }
-        
-        case STMT_WHILE: {
-            // While loop: while (condition) body; endwhile
-            result = mapinsert(result, str_dup_to_var("condition"), 
-                               expr_to_map_visitor(stmt->s.loop.condition, symtab));
-            result = mapinsert(result, str_dup_to_var("body"), 
-                               stmt_to_map_visitor(stmt->s.loop.body, symtab));
-            
-            // Include variable ID for named loops (-1 for unnamed)
-            result = mapinsert(result, str_dup_to_var("id"), Var::new_int(stmt->s.loop.id));
-            
-            // Include variable name if symbol table available and loop is named
-            if (symtab && stmt->s.loop.id >= 0 && stmt->s.loop.id < symtab->num_names) {
-                result = mapinsert(result, str_dup_to_var("name"), 
-                                   str_dup_to_var(symtab->names[stmt->s.loop.id]));
-            }
-            break;
-        }
-        
-        case STMT_LIST: {
-            // For-in loop: for x in (list) body; endfor
-            result = mapinsert(result, str_dup_to_var("expr"), 
-                               expr_to_map_visitor(stmt->s.list.expr, symtab));
-            result = mapinsert(result, str_dup_to_var("body"), 
-                               stmt_to_map_visitor(stmt->s.list.body, symtab));
-            
-            // Include variable ID and name for loop variable
-            result = mapinsert(result, str_dup_to_var("id"), Var::new_int(stmt->s.list.id));
-            if (symtab && stmt->s.list.id >= 0 && stmt->s.list.id < symtab->num_names) {
-                result = mapinsert(result, str_dup_to_var("name"), 
-                                   str_dup_to_var(symtab->names[stmt->s.list.id]));
-            }
-            
-            // Include index variable if used (-1 if not used)
-            result = mapinsert(result, str_dup_to_var("index"), Var::new_int(stmt->s.list.index));
-            if (symtab && stmt->s.list.index >= 0 && stmt->s.list.index < symtab->num_names) {
-                result = mapinsert(result, str_dup_to_var("index_name"), 
-                                   str_dup_to_var(symtab->names[stmt->s.list.index]));
-            }
-            break;
-        }
-        
-        case STMT_RANGE: {
-            // For-range loop: for x in [from..to] body; endfor
-            result = mapinsert(result, str_dup_to_var("from"), 
-                               expr_to_map_visitor(stmt->s.range.from, symtab));
-            result = mapinsert(result, str_dup_to_var("to"), 
-                               expr_to_map_visitor(stmt->s.range.to, symtab));
-            result = mapinsert(result, str_dup_to_var("body"), 
-                               stmt_to_map_visitor(stmt->s.range.body, symtab));
-            
-            // Include variable ID and name for loop variable
-            result = mapinsert(result, str_dup_to_var("id"), Var::new_int(stmt->s.range.id));
-            if (symtab && stmt->s.range.id >= 0 && stmt->s.range.id < symtab->num_names) {
-                result = mapinsert(result, str_dup_to_var("name"), 
-                                   str_dup_to_var(symtab->names[stmt->s.range.id]));
-            }
-            break;
-        }
-        
-        case STMT_FORK: {
-            // Fork statement: fork (time) body; endfork
-            result = mapinsert(result, str_dup_to_var("time"), 
-                               expr_to_map_visitor(stmt->s.fork.time, symtab));
-            result = mapinsert(result, str_dup_to_var("body"), 
-                               stmt_to_map_visitor(stmt->s.fork.body, symtab));
-            
-            // Include variable ID for named forks (-1 for unnamed)
-            result = mapinsert(result, str_dup_to_var("id"), Var::new_int(stmt->s.fork.id));
-            if (symtab && stmt->s.fork.id >= 0 && stmt->s.fork.id < symtab->num_names) {
-                result = mapinsert(result, str_dup_to_var("name"), 
-                                   str_dup_to_var(symtab->names[stmt->s.fork.id]));
-            }
-            break;
-        }
-        
-        case STMT_EXPR: {
-            // Expression statement: expr;
-            result = mapinsert(result, str_dup_to_var("expr"), 
-                               expr_to_map_visitor(stmt->s.expr, symtab));
-            break;
-        }
-        
-        case STMT_RETURN: {
-            // Return statement: return expr; or return;
-            if (stmt->s.expr) {
-                result = mapinsert(result, str_dup_to_var("expr"), 
-                                   expr_to_map_visitor(stmt->s.expr, symtab));
-            } else {
-                result = mapinsert(result, str_dup_to_var("expr"), var_ref(zero));
-            }
-            break;
-        }
-        
-        case STMT_TRY_EXCEPT: {
-            // Try-except statement: try body; except err (codes) handler; endtry
-            result = mapinsert(result, str_dup_to_var("body"), 
-                               stmt_to_map_visitor(stmt->s._catch.body, symtab));
-            
-            // Convert exception handlers  
-            Var excepts_list = new_list(0);
-            for (Except_Arm *arm = stmt->s._catch.excepts; arm != nullptr; arm = arm->next) {
-                Var except_map = new_map();
-                except_map = mapinsert(except_map, str_dup_to_var("id"), Var::new_int(arm->id));
-                except_map = mapinsert(except_map, str_dup_to_var("stmt"), 
-                                       stmt_to_map_visitor(arm->stmt, symtab));
-                
-                // Include variable name if symbol table available
-                if (symtab && arm->id >= 0 && arm->id < symtab->num_names) {
-                    except_map = mapinsert(except_map, str_dup_to_var("name"), 
-                                           str_dup_to_var(symtab->names[arm->id]));
-                }
-                
-                // Convert exception codes (Arg_List) to MAP format
-                if (arm->codes) {
-                    except_map = mapinsert(except_map, str_dup_to_var("codes"), 
-                                           arg_list_to_list(arm->codes, symtab));
-                }
-                
-                excepts_list = listappend(excepts_list, except_map);
-            }
-            result = mapinsert(result, str_dup_to_var("excepts"), excepts_list);
-            break;
-        }
-        
-        case STMT_TRY_FINALLY: {
-            // Try-finally statement: try body; finally handler; endtry
-            result = mapinsert(result, str_dup_to_var("body"), 
-                               stmt_to_map_visitor(stmt->s.finally.body, symtab));
-            result = mapinsert(result, str_dup_to_var("handler"), 
-                               stmt_to_map_visitor(stmt->s.finally.handler, symtab));
-            break;
-        }
-        
-        case STMT_BREAK:
-        case STMT_CONTINUE: {
-            // Break/continue statements: break; continue; 
-            // No additional fields needed - type is sufficient
-            break;
-        }
-        
-        default:
-            // Mark as unimplemented for now
-            result = mapinsert(result, str_dup_to_var("_unimplemented"), Var::new_int(1));
-            break;
-    }
-    
-    return result;
-}
-
-Var stmt_to_map(Stmt *stmt, Symtab *symtab) {
-    if (!stmt) {
-        return var_ref(zero);
-    }
-    
-    Var result = stmt_to_map_visitor(stmt, symtab);
-    
-    // Add version and symbol table to top-level
-    result = mapinsert(result, str_dup_to_var(FIELD_VERSION), Var::new_int(AST_SCHEMA_VERSION));
-    if (symtab) {
-        result = mapinsert(result, str_dup_to_var(FIELD_SYMTAB), symtab_to_list(symtab));
-    }
-    
-    return result;
-}
-
-// Reverse conversion: MAP → Expr  
-static Expr *map_to_expr_visitor(Var map, Symtab *symtab) {
-    if (map.type != TYPE_MAP) {
-        return nullptr;
-    }
-    
-    // Get type field
-    Var type_field;
-    if (maplookup(map, str_dup_to_var(FIELD_TYPE), &type_field, 0) == nullptr) {
-        return nullptr; // Invalid map - missing type field
-    }
-    if (type_field.type != TYPE_STR) {
-        return nullptr;
-    }
-    
-    const char *type_name = type_field.v.str;
-    
-    // Handle special literal and identifier cases
-    if (strcmp(type_name, "literal") == 0) {
-        Var value_field;
-        if (maplookup(map, str_dup_to_var("value"), &value_field, 0) == nullptr) {
-            return nullptr;
-        }
-        Expr *result = alloc_expr(EXPR_VAR);
-        result->e.var = var_ref(value_field);
-        return result;
-    }
-    
-    if (strcmp(type_name, "identifier") == 0) {
-        Var id_field;
-        if (maplookup(map, str_dup_to_var("id"), &id_field, 0) == nullptr) {
-            return nullptr;
-        }
-        if (id_field.type != TYPE_INT) {
-            return nullptr;
-        }
-        Expr *result = alloc_expr(EXPR_ID);
-        result->e.id = id_field.v.num;
-        return result;
-    }
-    
-    // Find expression kind by name
-    Expr_Kind kind = (Expr_Kind)-1;
-    for (int i = 0; i < SizeOf_Expr_Kind; i++) {
-        if (strcmp(type_name, expr_type_names[i]) == 0) {
-            kind = (Expr_Kind)i;
-            break;
-        }
-    }
-    
-    if (kind == (Expr_Kind)-1) {
-        return nullptr; // Unknown expression type
-    }
-    
-    
-    // Create expression based on kind
-    switch (kind) {
-        case EXPR_PROP: {
-            // Property access: obj.prop (uses "obj" and "prop" fields, not "lhs"/"rhs")
-            Var obj_field, prop_field;
-            if (maplookup(map, str_dup_to_var("obj"), &obj_field, 0) == nullptr ||
-                maplookup(map, str_dup_to_var("prop"), &prop_field, 0) == nullptr) {
-                return nullptr;
-            }
-            
-            Expr *obj = map_to_expr_visitor(obj_field, symtab);
-            Expr *prop = map_to_expr_visitor(prop_field, symtab);
-            
-            if (!obj || !prop) {
-                return nullptr; // Automatic cleanup via allocation pool
-            }
-            
-            return alloc_binary(EXPR_PROP, obj, prop);
-        }
-        
         case EXPR_ASGN:
-        case EXPR_INDEX:
-        case EXPR_PLUS:
-        case EXPR_MINUS:
-        case EXPR_TIMES:
-        case EXPR_DIVIDE:
-        case EXPR_MOD:
-        case EXPR_EXP:
-        case EXPR_EQ:
-        case EXPR_NE:
-        case EXPR_LT:
-        case EXPR_LE:
-        case EXPR_GT:
-        case EXPR_GE:
-        case EXPR_IN:
-        case EXPR_AND:
-        case EXPR_OR:
-        case EXPR_BITOR:
-        case EXPR_BITAND:
-        case EXPR_BITXOR:
-        case EXPR_BITSHL:
-        case EXPR_BITSHR: {
-            // Binary operators
-            Var lhs_field, rhs_field;
-            if (maplookup(map, str_dup_to_var("lhs"), &lhs_field, 0) == nullptr ||
-                maplookup(map, str_dup_to_var("rhs"), &rhs_field, 0) == nullptr) {
-                return nullptr;
-            }
-            
-            Expr *lhs = map_to_expr_visitor(lhs_field, symtab);
-            Expr *rhs = map_to_expr_visitor(rhs_field, symtab);
-            
-            if (!lhs || !rhs) {
-                return nullptr; // Automatic cleanup via allocation pool
-            }
-            
-            return alloc_binary(kind, lhs, rhs);
-        }
-        
-        case EXPR_CALL: {
-            // Function call: func_name(args)
-            Var func_field;
-            if (maplookup(map, str_dup_to_var("func"), &func_field, 0) == nullptr) {
-                return nullptr;
-            }
-            if (func_field.type != TYPE_STR) {
-                return nullptr;
-            }
-            
-            // Look up function by name
-            unsigned func_num = number_func_by_name(func_field.v.str);
-            if (func_num == 0) {
-                return nullptr; // Unknown function
-            }
-            
-            // Handle arguments (optional field) using existing helper function
-            Arg_List *args = nullptr;
-            Var args_field;
-            if (maplookup(map, str_dup_to_var("args"), &args_field, 0) != nullptr) {
-                args = list_to_arg_list(args_field, symtab);
-                // If args conversion fails, it's not critical - just use null
-            }
-            
-            Expr *result = alloc_expr(EXPR_CALL);
-            result->e.call.func = func_num;
-            result->e.call.args = args;
-            return result;
-        }
-        
-        case EXPR_NOT:
-        case EXPR_NEGATE:
-        case EXPR_COMPLEMENT: {
-            // Unary operators
-            Var expr_field;
-            if (maplookup(map, str_dup_to_var("expr"), &expr_field, 0) == nullptr) {
-                return nullptr;
-            }
-            Expr *expr = map_to_expr_visitor(expr_field, symtab);
-            
-            if (!expr) {
-                return nullptr;
-            }
-            
-            Expr *result = alloc_expr(kind);
-            result->e.expr = expr;
-            return result;
-        }
-        
-        case EXPR_COND: {
-            // Conditional expression
-            Var condition_field, consequent_field, alternate_field;
-            if (maplookup(map, str_dup_to_var("condition"), &condition_field, 0) == nullptr ||
-                maplookup(map, str_dup_to_var("consequent"), &consequent_field, 0) == nullptr ||
-                maplookup(map, str_dup_to_var("alternate"), &alternate_field, 0) == nullptr) {
-                return nullptr;
-            }
-            
-            Expr *condition = map_to_expr_visitor(condition_field, symtab);
-            Expr *consequent = map_to_expr_visitor(consequent_field, symtab);
-            Expr *alternate = map_to_expr_visitor(alternate_field, symtab);
-            
-            if (!condition || !consequent || !alternate) {
-                return nullptr; // Automatic cleanup via allocation pool
-            }
-            
-            Expr *result = alloc_expr(EXPR_COND);
-            result->e.cond.condition = condition;
-            result->e.cond.consequent = consequent;
-            result->e.cond.alternate = alternate;
-            return result;
-        }
-        
-        case EXPR_LIST: {
-            // List literal: {expr1, expr2, ...}
-            Var elements_field;
-            if (maplookup(map, str_dup_to_var("elements"), &elements_field, 0) == nullptr) {
-                // Empty list
-                Expr *result = alloc_expr(EXPR_LIST);
-                result->e.list = nullptr;
-                return result;
-            }
-            
-            if (elements_field.type != TYPE_LIST) {
-                return nullptr;
-            }
-            
-            // Convert elements to Arg_List
-            Arg_List *arg_list = nullptr;
-            Arg_List **last_ptr = &arg_list;
-            
-            for (int i = 1; i <= elements_field.v.list[0].v.num; i++) {
-                Var element = elements_field.v.list[i];
-                if (element.type != TYPE_MAP) {
-                    // Cleanup and return error
-                    while (arg_list) {
-                        Arg_List *next = arg_list->next;
-                        if (arg_list->expr) dealloc_node(arg_list->expr);
-                        myfree(arg_list, M_AST);
-                        arg_list = next;
-                    }
-                    return nullptr;
-                }
-                
-                // Extract expr field from element
-                Var expr_field;
-                if (maplookup(element, str_dup_to_var("expr"), &expr_field, 0) == nullptr) {
-                    // Cleanup and return error
-                    while (arg_list) {
-                        Arg_List *next = arg_list->next;
-                        if (arg_list->expr) dealloc_node(arg_list->expr);
-                        myfree(arg_list, M_AST);
-                        arg_list = next;
-                    }
-                    return nullptr;
-                }
-                
-                Expr *expr = map_to_expr_visitor(expr_field, symtab);
-                if (!expr) {
-                    // Automatic cleanup via allocation pool
-                    return nullptr;
-                }
-                
-                // Create new Arg_List node
-                Arg_List *new_arg = (Arg_List *)mymalloc(sizeof(Arg_List), M_AST);
-                new_arg->expr = expr;
-                new_arg->kind = ARG_NORMAL; // Default to normal arguments
-                new_arg->next = nullptr;
-                
-                // Add to list
-                *last_ptr = new_arg;
-                last_ptr = &new_arg->next;
-            }
-            
-            Expr *result = alloc_expr(EXPR_LIST);
-            result->e.list = arg_list;
-            return result;
-        }
-        
-        case EXPR_VERB: {
-            // Verb call: obj:verb(args)
-            Var obj_field, verb_field, args_field;
-            if (maplookup(map, str_dup_to_var("obj"), &obj_field, 0) == nullptr ||
-                maplookup(map, str_dup_to_var("verb"), &verb_field, 0) == nullptr) {
-                return nullptr;
-            }
-            
-            Expr *obj = map_to_expr_visitor(obj_field, symtab);
-            Expr *verb = map_to_expr_visitor(verb_field, symtab);
-            
-            if (!obj || !verb) {
-                return nullptr; // Automatic cleanup via allocation pool
-            }
-            
-            // Handle arguments (optional field)
-            Arg_List *args = nullptr;
-            if (maplookup(map, str_dup_to_var("args"), &args_field, 0) != nullptr) {
-                if (args_field.type == TYPE_LIST) {
-                    // Convert list of argument expressions
-                    Arg_List **last_ptr = &args;
-                    
-                    for (int i = 1; i <= args_field.v.list[0].v.num; i++) {
-                        Var arg_map = args_field.v.list[i];
-                        
-                        // Skip invalid arguments
-                        if (arg_map.type != TYPE_MAP) {
-                            continue;
-                        }
-                        
-                        // Get expression field from argument map
-                        Var expr_field;
-                        if (maplookup(arg_map, str_dup_to_var("expr"), &expr_field, 0) != nullptr) {
-                            Expr *expr = map_to_expr_visitor(expr_field, symtab);
-                            if (!expr) {
-                                // Automatic cleanup via allocation pool
-                                return nullptr;
-                            }
-                            
-                            // Create new Arg_List node
-                            Arg_List *new_arg = (Arg_List *)mymalloc(sizeof(Arg_List), M_AST);
-                            new_arg->expr = expr;
-                            new_arg->kind = ARG_NORMAL;
-                            new_arg->next = nullptr;
-                            
-                            // Add to list
-                            *last_ptr = new_arg;
-                            last_ptr = &new_arg->next;
-                        }
-                    }
-                }
-            }
-            
-            Expr *result = alloc_expr(EXPR_VERB);
-            result->e.verb.obj = obj;
-            result->e.verb.verb = verb;
-            result->e.verb.args = args;
-            return result;
-        }
-        
-        case EXPR_RANGE: {
-            // Range expression: base[from..to] or [from..to]
-            Var from_field, to_field;
-            if (maplookup(map, str_dup_to_var("from"), &from_field, 0) == nullptr ||
-                maplookup(map, str_dup_to_var("to"), &to_field, 0) == nullptr) {
-                return nullptr;
-            }
-            
-            Expr *from = map_to_expr_visitor(from_field, symtab);
-            Expr *to = map_to_expr_visitor(to_field, symtab);
-            if (!from || !to) {
-                return nullptr;
-            }
-            
-            Expr *result = alloc_expr(EXPR_RANGE);
-            result->e.range.from = from;
-            result->e.range.to = to;
-            result->e.range.base = nullptr; // Default to no base
-            
-            // Base is optional - only present for indexed ranges like obj[1..3]
-            Var base_field;
-            if (maplookup(map, str_dup_to_var("base"), &base_field, 0) != nullptr) {
-                // Only try to convert base if the field exists and is valid
-                Expr *base = map_to_expr_visitor(base_field, symtab);
-                if (base) {  // Only set base if conversion succeeds
-                    result->e.range.base = base;
-                }
-                // If base conversion fails, we still continue with base=nullptr
-            }
-            
-            return result;
-        }
-        
-        case EXPR_MAP: {
-            // Map literal: ["key" -> value, "k2" -> v2, ...]
-            Var elements_field;
-            if (maplookup(map, str_dup_to_var("elements"), &elements_field, 0) == nullptr) {
-                // Empty map - this is correct behavior
-                Expr *result = alloc_expr(EXPR_MAP);
-                result->e.map = nullptr;
-                return result;
-            }
-            
-            if (elements_field.type != TYPE_LIST) {
-                return nullptr;
-            }
-            
-            // Convert elements to Map_List
-            Map_List *map_list = nullptr;
-            Map_List *last_entry = nullptr;
-            
-            for (int i = 1; i <= elements_field.v.list[0].v.num; i++) {
-                Var element = elements_field.v.list[i];
-                if (element.type != TYPE_MAP) {
-                    // Cleanup and return error
-                    while (map_list) {
-                        Map_List *next = map_list->next;
-                        if (map_list->key) dealloc_node(map_list->key);
-                        if (map_list->value) dealloc_node(map_list->value);
-                        myfree(map_list, M_AST);
-                        map_list = next;
-                    }
-                    return nullptr;
-                }
-                
-                // Extract key and value fields from element
-                Var key_field, value_field;
-                if (maplookup(element, str_dup_to_var("key"), &key_field, 0) == nullptr ||
-                    maplookup(element, str_dup_to_var("value"), &value_field, 0) == nullptr) {
-                    // Cleanup and return error
-                    while (map_list) {
-                        Map_List *next = map_list->next;
-                        if (map_list->key) dealloc_node(map_list->key);
-                        if (map_list->value) dealloc_node(map_list->value);
-                        myfree(map_list, M_AST);
-                        map_list = next;
-                    }
-                    return nullptr;
-                }
-                
-                Expr *key = map_to_expr_visitor(key_field, symtab);
-                Expr *value = map_to_expr_visitor(value_field, symtab);
-                if (!key || !value) {
-                    // Cleanup and return error
-                    if (key) dealloc_node(key);
-                    if (value) dealloc_node(value);
-                    while (map_list) {
-                        Map_List *next = map_list->next;
-                        if (map_list->key) dealloc_node(map_list->key);
-                        if (map_list->value) dealloc_node(map_list->value);
-                        myfree(map_list, M_AST);
-                        map_list = next;
-                    }
-                    return nullptr;
-                }
-                
-                Map_List *entry = alloc_map_list(key, value);
-                entry->next = nullptr;
-                
-                // Build list in correct order (first to last)
-                if (!map_list) {
-                    map_list = entry;
-                    last_entry = entry;
-                } else {
-                    last_entry->next = entry;
-                    last_entry = entry;
-                }
-            }
-            
-            Expr *result = alloc_expr(EXPR_MAP);
-            result->e.map = map_list;
-            return result;
-        }
-        
+            node = new_node(S_assign);
+            node = put(node, S_target, expr_to_var(expr->e.bin.lhs, names));
+            return put(node, S_value, expr_to_var(expr->e.bin.rhs, names));
+
+        case EXPR_CALL:
+            node = new_node(S_call);
+            node = put(node, S_function,
+                       str_dup_to_var(name_func_by_num(expr->e.call.func)));
+            return put(node, S_args, args_to_var(expr->e.call.args, names));
+
+        case EXPR_LIST:
+            return put(new_node(S_list), S_items,
+                       args_to_var(expr->e.list, names));
+
+        case EXPR_MAP:
+            return put(new_node(S_map), S_entries,
+                       map_list_to_var(expr->e.map, names));
+
+        case EXPR_SCATTER:
+            return put(new_node(S_scatter), S_items,
+                       scatter_to_var(expr->e.scatter, names));
+
+        case EXPR_COND:
+            node = new_node(S_conditional);
+            node = put(node, S_condition,
+                       expr_to_var(expr->e.cond.condition, names));
+            node = put(node, S_consequent,
+                       expr_to_var(expr->e.cond.consequent, names));
+            return put(node, S_alternate,
+                       expr_to_var(expr->e.cond.alternate, names));
+
+        case EXPR_CATCH:
+            node = new_node(S_catch);
+            node = put(node, S_expr, expr_to_var(expr->e._catch._try, names));
+            if (expr->e._catch.codes)
+                node = put(node, S_codes,
+                           args_to_var(expr->e._catch.codes, names));
+            if (expr->e._catch.except)
+                node = put(node, S_default,
+                           expr_to_var(expr->e._catch.except, names));
+            return node;
+
         case EXPR_FIRST:
+            return new_node(S_first);
+
         case EXPR_LAST:
-            // Nullary operators: ^ and $ (no sub-expressions to convert)
-            return alloc_expr(kind);
-            
-        case EXPR_CATCH: {
-            // Catch expression: try_expr ! (codes) => except_expr
-            Var try_field, codes_field, except_field;
-            
-            if (maplookup(map, str_dup_to_var("try"), &try_field, 0) == nullptr ||
-                maplookup(map, str_dup_to_var("except"), &except_field, 0) == nullptr) {
-                return nullptr;
-            }
-            
-            Expr *result = alloc_expr(EXPR_CATCH);
-            result->e._catch._try = map_to_expr_visitor(try_field, symtab);
-            if (!result->e._catch._try) {
-                return nullptr;
-            }
-            
-            result->e._catch.except = map_to_expr_visitor(except_field, symtab);
-            if (!result->e._catch.except) {
-                return nullptr;
-            }
-            
-            // Handle optional codes
-            if (maplookup(map, str_dup_to_var("codes"), &codes_field, 0) != nullptr) {
-                result->e._catch.codes = list_to_arg_list(codes_field, symtab);
-            } else {
-                result->e._catch.codes = nullptr;
-            }
-            
-            return result;
-        }
-        
-        case EXPR_SCATTER: {
-            // Scatter expression: {a, ?b=default, @rest}
-            Var elements_field;
-            if (maplookup(map, str_dup_to_var("elements"), &elements_field, 0) == nullptr) {
-                // Empty scatter - this shouldn't happen but handle gracefully
-                Expr *result = alloc_expr(EXPR_SCATTER);
-                result->e.scatter = nullptr;
-                return result;
-            }
-            
-            Scatter *scatter = list_to_scatter(elements_field, symtab);
-            if (!scatter) {
-                return nullptr;
-            }
-            
-            Expr *result = alloc_expr(EXPR_SCATTER);
-            result->e.scatter = scatter;
-            return result;
-        }
-            
-        // TODO: Add more expression types as needed
+            return new_node(S_last);
+
         default:
-            return nullptr; // Unimplemented expression type
-    }
-}
-
-Expr *map_to_expr(Var map, Symtab *symtab) {
-    if (map.type != TYPE_MAP) {
-        return nullptr;
-    }
-    
-    // Validate version
-    if (!validate_version(map)) {
-        return nullptr;
-    }
-    
-    return map_to_expr_visitor(map, symtab);
-}
-
-// Reverse conversion: MAP → Stmt
-static Stmt *map_to_stmt_visitor(Var map, Symtab *symtab) {
-    if (map.type != TYPE_MAP) {
-        return nullptr;
-    }
-    
-    // Get type field
-    Var type_field;
-    if (maplookup(map, str_dup_to_var(FIELD_TYPE), &type_field, 0) == nullptr) {
-        return nullptr; // Invalid map - missing type field
-    }
-    if (type_field.type != TYPE_STR) {
-        return nullptr;
-    }
-    
-    const char *type_name = type_field.v.str;
-    
-    // Find statement kind by name
-    Stmt_Kind kind = (Stmt_Kind)-1;
-    for (int i = 0; i < SizeOf_Stmt_Kind; i++) {
-        if (strcmp(type_name, stmt_type_names[i]) == 0) {
-            kind = (Stmt_Kind)i;
             break;
-        }
     }
-    
-    if (kind == (Stmt_Kind)-1) {
-        return nullptr; // Unknown statement type
+
+    if (operator_arity[expr->kind] == 2) {
+        node = new_node(S_binary);
+        node = put(node, S_op, var_ref(operator_name[expr->kind]));
+        node = put(node, S_lhs, expr_to_var(expr->e.bin.lhs, names));
+        return put(node, S_rhs, expr_to_var(expr->e.bin.rhs, names));
+    } else if (operator_arity[expr->kind] == 1) {
+        node = new_node(S_unary);
+        node = put(node, S_op, var_ref(operator_name[expr->kind]));
+        return put(node, S_expr, expr_to_var(expr->e.expr, names));
     }
-    
-    // Create statement based on kind
-    switch (kind) {
-        case STMT_COND: {
-            // Conditional statement: if/elseif/else
-            Var arms_field;
-            if (maplookup(map, str_dup_to_var("arms"), &arms_field, 0) == nullptr) {
-                return nullptr;
+
+    panic_moo("EXPR_TO_VAR: Unknown Expr_Kind");
+    return zero;
+}
+
+static Var
+stmt_to_var(Stmt * stmt, const char **names)
+{
+    Var node, list;
+    Cond_Arm *arm;
+    Except_Arm *ex;
+    int n = 0;
+
+    switch (stmt->kind) {
+        case STMT_COND:
+            for (arm = stmt->s.cond.arms; arm; arm = arm->next)
+                n++;
+            list = new_list(n);
+            for (arm = stmt->s.cond.arms, n = 0; arm; arm = arm->next) {
+                Var item = new_map();
+
+                item = put(item, S_condition,
+                           expr_to_var(arm->condition, names));
+                item = put(item, S_body, stmts_to_var(arm->stmt, names));
+                list.v.list[++n] = item;
             }
-            if (arms_field.type != TYPE_LIST) {
-                return nullptr;
+            node = put(new_node(S_if), S_arms, list);
+            if (stmt->s.cond.otherwise)
+                node = put(node, S_else,
+                           stmts_to_var(stmt->s.cond.otherwise, names));
+            return node;
+
+        case STMT_LIST:
+            node = put_name(new_node(S_for), S_var, names, stmt->s.list.id);
+            if (stmt->s.list.index >= 0)
+                node = put_name(node, S_index, names, stmt->s.list.index);
+            node = put(node, S_expr, expr_to_var(stmt->s.list.expr, names));
+            return put(node, S_body, stmts_to_var(stmt->s.list.body, names));
+
+        case STMT_RANGE:
+            node = put_name(new_node(S_for_range), S_var, names,
+                            stmt->s.range.id);
+            node = put(node, S_from, expr_to_var(stmt->s.range.from, names));
+            node = put(node, S_to, expr_to_var(stmt->s.range.to, names));
+            return put(node, S_body, stmts_to_var(stmt->s.range.body, names));
+
+        case STMT_WHILE:
+            node = new_node(S_while);
+            if (stmt->s.loop.id >= 0)
+                node = put_name(node, S_name, names, stmt->s.loop.id);
+            node = put(node, S_condition,
+                       expr_to_var(stmt->s.loop.condition, names));
+            return put(node, S_body, stmts_to_var(stmt->s.loop.body, names));
+
+        case STMT_FORK:
+            node = new_node(S_fork);
+            if (stmt->s.fork.id >= 0)
+                node = put_name(node, S_var, names, stmt->s.fork.id);
+            node = put(node, S_delay, expr_to_var(stmt->s.fork.time, names));
+            return put(node, S_body, stmts_to_var(stmt->s.fork.body, names));
+
+        case STMT_EXPR:
+            return put(new_node(S_expr), S_expr,
+                       expr_to_var(stmt->s.expr, names));
+
+        case STMT_RETURN:
+            node = new_node(S_return);
+            if (stmt->s.expr)
+                node = put(node, S_value, expr_to_var(stmt->s.expr, names));
+            return node;
+
+        case STMT_TRY_EXCEPT:
+            for (ex = stmt->s._catch.excepts; ex; ex = ex->next)
+                n++;
+            list = new_list(n);
+            for (ex = stmt->s._catch.excepts, n = 0; ex; ex = ex->next) {
+                Var item = new_map();
+
+                if (ex->id >= 0)
+                    item = put_name(item, S_var, names, ex->id);
+                if (ex->codes)
+                    item = put(item, S_codes, args_to_var(ex->codes, names));
+                item = put(item, S_body, stmts_to_var(ex->stmt, names));
+                list.v.list[++n] = item;
             }
-            
-            Stmt *result = alloc_stmt(STMT_COND);
-            result->s.cond.arms = nullptr;
-            result->s.cond.otherwise = nullptr;
-            
-            // Convert arms list
-            Cond_Arm **arm_ptr = &result->s.cond.arms;
-            for (int i = 1; i <= arms_field.v.list[0].v.num; i++) {
-                Var arm_map = arms_field.v.list[i];
-                if (arm_map.type != TYPE_MAP) {
-                    return nullptr; // Automatic cleanup via allocation pool
-                }
-                
-                Var condition_field, stmt_field;
-                if (maplookup(arm_map, str_dup_to_var("condition"), &condition_field, 0) == nullptr ||
-                    maplookup(arm_map, str_dup_to_var("stmt"), &stmt_field, 0) == nullptr) {
-                    return nullptr; // Automatic cleanup via allocation pool
-                }
-                
-                Expr *condition = map_to_expr_visitor(condition_field, symtab);
-                Stmt *stmt = map_to_stmt_visitor(stmt_field, symtab);
-                
-                if (!condition || !stmt) {
-                    return nullptr; // Automatic cleanup via allocation pool
-                }
-                
-                *arm_ptr = alloc_cond_arm(condition, stmt);
-                arm_ptr = &(*arm_ptr)->next;
-            }
-            
-            // Convert otherwise clause if present
-            Var otherwise_field;
-            if (maplookup(map, str_dup_to_var("otherwise"), &otherwise_field, 0) != nullptr && 
-                otherwise_field.type != TYPE_NONE) {
-                result->s.cond.otherwise = map_to_stmt_visitor(otherwise_field, symtab);
-                if (!result->s.cond.otherwise) {
-                    return nullptr; // Automatic cleanup via allocation pool
-                }
-            }
-            
-            return result;
-        }
-        
-        case STMT_WHILE: {
-            // While loop
-            Var condition_field, body_field, id_field;
-            if (maplookup(map, str_dup_to_var("condition"), &condition_field, 0) == nullptr ||
-                maplookup(map, str_dup_to_var("body"), &body_field, 0) == nullptr) {
-                return nullptr;
-            }
-            // id field is optional for WHILE
-            maplookup(map, str_dup_to_var("id"), &id_field, 0);
-            
-            Expr *condition = map_to_expr_visitor(condition_field, symtab);
-            Stmt *body = map_to_stmt_visitor(body_field, symtab);
-            
-            if (!condition || !body) {
-                return nullptr; // Automatic cleanup via allocation pool
-            }
-            
-            Stmt *result = alloc_stmt(STMT_WHILE);
-            result->s.loop.condition = condition;
-            result->s.loop.body = body;
-            result->s.loop.id = id_field.v.num;
-            return result;
-        }
-        
-        case STMT_EXPR: {
-            // Expression statement
-            Var expr_field;
-            if (maplookup(map, str_dup_to_var("expr"), &expr_field, 0) == nullptr) {
-                return nullptr;
-            }
-            Expr *expr = map_to_expr_visitor(expr_field, symtab);
-            
-            if (!expr) {
-                return nullptr;
-            }
-            
-            Stmt *result = alloc_stmt(STMT_EXPR);
-            result->s.expr = expr;
-            return result;
-        }
-        
-        case STMT_RETURN: {
-            // Return statement
-            Var expr_field;
-            // Expression is optional for return statements
-            maplookup(map, str_dup_to_var("expr"), &expr_field, 0);
-            
-            Stmt *result = alloc_stmt(STMT_RETURN);
-            if (expr_field.type != TYPE_NONE) {
-                result->s.expr = map_to_expr_visitor(expr_field, symtab);
-                if (!result->s.expr) {
-                    return nullptr; // Automatic cleanup via allocation pool
-                }
-            } else {
-                result->s.expr = nullptr;
-            }
-            return result;
-        }
-        
-        case STMT_LIST: {
-            // For-in-list loop: for x in (list) body; endfor
-            Var expr_field, body_field, id_field, index_field;
-            if (maplookup(map, str_dup_to_var("expr"), &expr_field, 0) == nullptr ||
-                maplookup(map, str_dup_to_var("body"), &body_field, 0) == nullptr ||
-                maplookup(map, str_dup_to_var("id"), &id_field, 0) == nullptr) {
-                return nullptr;
-            }
-            
-            Expr *expr = map_to_expr_visitor(expr_field, symtab);
-            Stmt *body = map_to_stmt_visitor(body_field, symtab);
-            
-            if (!expr || !body || id_field.type != TYPE_INT) {
-                return nullptr; // Automatic cleanup via allocation pool
-            }
-            
-            Stmt *result = alloc_stmt(STMT_LIST);
-            result->s.list.expr = expr;
-            result->s.list.body = body;
-            result->s.list.id = id_field.v.num;
-            
-            // Handle optional index variable (-1 if not used)
-            if (maplookup(map, str_dup_to_var("index"), &index_field, 0) != nullptr &&
-                index_field.type == TYPE_INT) {
-                result->s.list.index = index_field.v.num;
-            } else {
-                result->s.list.index = -1;
-            }
-            
-            return result;
-        }
-        
-        case STMT_RANGE: {
-            // For-in-range loop: for x in [from..to] body; endfor
-            Var from_field, to_field, body_field, id_field;
-            if (maplookup(map, str_dup_to_var("from"), &from_field, 0) == nullptr ||
-                maplookup(map, str_dup_to_var("to"), &to_field, 0) == nullptr ||
-                maplookup(map, str_dup_to_var("body"), &body_field, 0) == nullptr ||
-                maplookup(map, str_dup_to_var("id"), &id_field, 0) == nullptr) {
-                return nullptr;
-            }
-            
-            Expr *from = map_to_expr_visitor(from_field, symtab);
-            Expr *to = map_to_expr_visitor(to_field, symtab);
-            Stmt *body = map_to_stmt_visitor(body_field, symtab);
-            
-            if (!from || !to || !body || id_field.type != TYPE_INT) {
-                return nullptr; // Automatic cleanup via allocation pool
-            }
-            
-            Stmt *result = alloc_stmt(STMT_RANGE);
-            result->s.range.from = from;
-            result->s.range.to = to;
-            result->s.range.body = body;
-            result->s.range.id = id_field.v.num;
-            
-            return result;
-        }
-        
+            node = new_node(S_try_except);
+            node = put(node, S_body, stmts_to_var(stmt->s._catch.body, names));
+            return put(node, S_excepts, list);
+
+        case STMT_TRY_FINALLY:
+            node = new_node(S_try_finally);
+            node = put(node, S_body,
+                       stmts_to_var(stmt->s.finally.body, names));
+            return put(node, S_finally,
+                       stmts_to_var(stmt->s.finally.handler, names));
+
         case STMT_BREAK:
-        case STMT_CONTINUE: {
-            // Simple statements - need to initialize s.exit field
-            Stmt *result = alloc_stmt(kind);
-            result->s.exit = -1;  // -1 means no named loop
-            return result;
-        }
-        
-        case STMT_TRY_EXCEPT: {
-            // Try-except statement: try body; except err (codes) handler; endtry
-            Var body_field, excepts_field;
-            if (maplookup(map, str_dup_to_var("body"), &body_field, 0) == nullptr ||
-                maplookup(map, str_dup_to_var("excepts"), &excepts_field, 0) == nullptr) {
-                return nullptr;
-            }
-            if (excepts_field.type != TYPE_LIST) {
-                return nullptr;
-            }
-            
-            Stmt *body = map_to_stmt_visitor(body_field, symtab);
-            if (!body) {
-                return nullptr; // Automatic cleanup via allocation pool
-            }
-            
-            Stmt *result = alloc_stmt(STMT_TRY_EXCEPT);
-            result->s._catch.body = body;
-            result->s._catch.excepts = nullptr;
-            
-            // Convert exception handlers list
-            Except_Arm **except_ptr = &result->s._catch.excepts;
-            for (int i = 1; i <= excepts_field.v.list[0].v.num; i++) {
-                Var except_map = excepts_field.v.list[i];
-                if (except_map.type != TYPE_MAP) {
-                    return nullptr; // Automatic cleanup via allocation pool
-                }
-                
-                Var id_field, stmt_field;
-                if (maplookup(except_map, str_dup_to_var("id"), &id_field, 0) == nullptr ||
-                    maplookup(except_map, str_dup_to_var("stmt"), &stmt_field, 0) == nullptr ||
-                    id_field.type != TYPE_INT) {
-                    return nullptr; // Automatic cleanup via allocation pool
-                }
-                
-                Stmt *except_stmt = map_to_stmt_visitor(stmt_field, symtab);
-                if (!except_stmt) {
-                    return nullptr; // Automatic cleanup via allocation pool
-                }
-                
-                // Convert exception codes from MAP to Arg_List
-                Arg_List *codes = nullptr;
-                Var codes_field;
-                if (maplookup(except_map, str_dup_to_var("codes"), &codes_field, 0) != nullptr) {
-                    codes = list_to_arg_list(codes_field, symtab);
-                    // If codes conversion fails, it's not critical - just use null
-                }
-                
-                *except_ptr = alloc_except(id_field.v.num, codes, except_stmt);
-                except_ptr = &(*except_ptr)->next;
-            }
-            
-            return result;
-        }
-        
-        case STMT_TRY_FINALLY: {
-            // Try-finally statement: try body; finally handler; endtry
-            Var body_field, handler_field;
-            if (maplookup(map, str_dup_to_var("body"), &body_field, 0) == nullptr ||
-                maplookup(map, str_dup_to_var("handler"), &handler_field, 0) == nullptr) {
-                return nullptr;
-            }
-            
-            Stmt *body = map_to_stmt_visitor(body_field, symtab);
-            Stmt *handler = map_to_stmt_visitor(handler_field, symtab);
-            
-            if (!body || !handler) {
-                return nullptr; // Automatic cleanup via allocation pool
-            }
-            
-            Stmt *result = alloc_stmt(STMT_TRY_FINALLY);
-            result->s.finally.body = body;
-            result->s.finally.handler = handler;
-            return result;
-        }
-        
-        case STMT_FORK: {
-            // Fork statement: fork (time) body; endfork
-            Var time_field, body_field, id_field;
-            if (maplookup(map, str_dup_to_var("time"), &time_field, 0) == nullptr ||
-                maplookup(map, str_dup_to_var("body"), &body_field, 0) == nullptr ||
-                maplookup(map, str_dup_to_var("id"), &id_field, 0) == nullptr) {
-                return nullptr;
-            }
-            
-            if (id_field.type != TYPE_INT) {
-                return nullptr;
-            }
-            
-            Expr *time = map_to_expr_visitor(time_field, symtab);
-            Stmt *body = map_to_stmt_visitor(body_field, symtab);
-            
-            if (!time || !body) {
-                return nullptr; // Automatic cleanup via allocation pool
-            }
-            
-            Stmt *result = alloc_stmt(STMT_FORK);
-            result->s.fork.time = time;
-            result->s.fork.body = body;
-            result->s.fork.id = id_field.v.num;
-            return result;
-        }
-        
-        default:
-            return nullptr; // Unimplemented statement type
+        case STMT_CONTINUE:
+            node = new_node(stmt->kind == STMT_BREAK ? S_break : S_continue);
+            if (stmt->s.exit >= 0)
+                node = put_name(node, S_name, names, stmt->s.exit);
+            return node;
     }
+
+    panic_moo("STMT_TO_VAR: Unknown Stmt_Kind");
+    return zero;
 }
 
-Stmt *map_to_stmt(Var map, Symtab *symtab) {
-    if (map.type != TYPE_MAP) {
-        return nullptr;
-    }
-    
-    // Validate version
-    if (!validate_version(map)) {
-        return nullptr;
-    }
-    
-    return map_to_stmt_visitor(map, symtab);
+static Var
+stmts_to_var(Stmt * stmts, const char **names)
+{
+    Stmt *stmt;
+    Var list;
+    int n = 0;
+
+    for (stmt = stmts; stmt; stmt = stmt->next)
+        n++;
+    list = new_list(n);
+    for (stmt = stmts, n = 0; stmt; stmt = stmt->next)
+        list.v.list[++n] = stmt_to_var(stmt, names);
+    return list;
 }
 
-/*********** Arg_List Conversion ***********/
+Var
+program_to_ast(Program * program)
+{
+    Stmt *stmts = decompile_program(program, MAIN_VECTOR);
+    Var ast = stmts_to_var(stmts, program->var_names);
 
-// Convert Arg_List to list of MAPs
-static Var arg_list_to_list(Arg_List *args, Symtab *symtab) {
-    Var result = new_list(0);
-    
-    for (Arg_List *arg = args; arg != nullptr; arg = arg->next) {
-        Var arg_map = new_map();
-        arg_map = mapinsert(arg_map, str_dup_to_var("kind"), 
-                            str_dup_to_var(arg->kind == ARG_NORMAL ? "normal" : "splice"));
-        arg_map = mapinsert(arg_map, str_dup_to_var("expr"), 
-                            expr_to_map_visitor(arg->expr, symtab));
-        result = listappend(result, arg_map);
-    }
-    
-    return result;
+    free_stmt(stmts);
+    return ast;
 }
 
-// Convert list of MAPs to Arg_List
-static Arg_List *list_to_arg_list(Var list, Symtab *symtab) {
-    if (list.type != TYPE_LIST) {
+/********** value to syntax tree **********/
+
+/*
+ * Everything is allocated between begin_code_allocation() and
+ * end_code_allocation(), so a tree abandoned half-built is freed in one go.
+ * A function here that fails has called fail() and returns 0 or a null
+ * pointer; its callers add their own position to the path on the way out.
+ */
+
+struct Builder {
+    Names *names;
+    int depth;
+    std::string error;		/* what is wrong */
+    std::string path;		/* and where, outermost part first */
+};
+
+static Expr *build_expr(Builder * b, Var value);
+static int build_stmts(Builder * b, Var list, Stmt ** stmts);
+
+static void
+fail(Builder * b, const char *fmt, ...)
+{
+    char buffer[200];
+    va_list args;
+
+    va_start(args, fmt);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+    b->error = buffer;
+}
+
+static void
+at_key(Builder * b, Var key)
+{
+    b->path.insert(0, std::string(".") + key.v.str);
+}
+
+static void
+at_index(Builder * b, int i)
+{
+    b->path.insert(0, "[" + std::to_string(i) + "]");
+}
+
+static int
+find(Var map, Var key, Var * value)
+{
+    return maplookup(map, key, value, 1) != nullptr;
+}
+
+static int
+find_required(Builder * b, Var map, Var key, Var * value)
+{
+    if (find(map, key, value))
+        return 1;
+    fail(b, "missing \"%s\"", key.v.str);
+    return 0;
+}
+
+static int
+check_type(Builder * b, Var value, var_type type)
+{
+    if (value.type == type)
+        return 1;
+    fail(b, "expected %s, found %s", parse_type(type), parse_type(value.type));
+    return 0;
+}
+
+/* The "type" of a node, or null if `value' is not a node at all. */
+static const char *
+node_type(Builder * b, Var value)
+{
+    Var type;
+
+    if (!check_type(b, value, TYPE_MAP))
+        return nullptr;
+    if (!find(value, S_type, &type) || type.type != TYPE_STR) {
+        fail(b, "missing \"type\"");
         return nullptr;
     }
-    
-    Arg_List *result = nullptr;
-    Arg_List **arg_ptr = &result;
-    
-    for (int i = 1; i <= list.v.list[0].v.num; i++) {
-        Var arg_map = list.v.list[i];
-        if (arg_map.type != TYPE_MAP) {
-            return nullptr; // Invalid - all args should be maps
-        }
-        
-        Var kind_field, expr_field;
-        if (maplookup(arg_map, str_dup_to_var("kind"), &kind_field, 0) == nullptr ||
-            maplookup(arg_map, str_dup_to_var("expr"), &expr_field, 0) == nullptr) {
-            return nullptr; // Missing required fields
-        }
-        
-        if (kind_field.type != TYPE_STR) {
-            return nullptr; // Invalid kind field
-        }
-        
-        enum Arg_Kind kind;
-        if (strcmp(kind_field.v.str, "normal") == 0) {
-            kind = ARG_NORMAL;
-        } else if (strcmp(kind_field.v.str, "splice") == 0) {
-            kind = ARG_SPLICE;
-        } else {
-            return nullptr; // Unknown arg kind
-        }
-        
-        Expr *expr = map_to_expr_visitor(expr_field, symtab);
+    return type.v.str;
+}
+
+static int
+is_node(Var value, Var type)
+{
+    Var found;
+
+    return value.type == TYPE_MAP && find(value, S_type, &found)
+           && found.type == TYPE_STR && !strcmp(found.v.str, type.v.str);
+}
+
+static Expr *
+expr_field(Builder * b, Var map, Var key)
+{
+    Var value;
+    Expr *expr;
+
+    if (!find_required(b, map, key, &value))
+        return nullptr;
+    if (!(expr = build_expr(b, value)))
+        at_key(b, key);
+    return expr;
+}
+
+/* `*expr' is null if the field is absent. */
+static int
+optional_expr_field(Builder * b, Var map, Var key, Expr ** expr)
+{
+    Var value;
+
+    *expr = nullptr;
+    if (!find(map, key, &value))
+        return 1;
+    if (!(*expr = build_expr(b, value)))
+        at_key(b, key);
+    return *expr != nullptr;
+}
+
+/* `*id' is -1 if an optional name is absent. */
+static int
+name_field(Builder * b, Var map, Var key, int optional, int *id)
+{
+    Var value;
+
+    *id = -1;
+    if (!find(map, key, &value)) {
+        if (!optional)
+            fail(b, "missing \"%s\"", key.v.str);
+        return optional;
+    }
+    if (value.type != TYPE_STR || !ok_identifier(value.v.str)) {
+        fail(b, "expected a variable name");
+        at_key(b, key);
+        return 0;
+    }
+    *id = find_or_add_name(&b->names, value.v.str);
+    return 1;
+}
+
+static int
+list_field(Builder * b, Var map, Var key, Var * list)
+{
+    if (!find_required(b, map, key, list))
+        return 0;
+    if (!check_type(b, *list, TYPE_LIST)) {
+        at_key(b, key);
+        return 0;
+    }
+    return 1;
+}
+
+static int
+build_args(Builder * b, Var list, Arg_List ** args)
+{
+    Arg_List **tail = args;
+    int i;
+
+    *args = nullptr;
+    for (i = 1; i <= list.v.list[0].v.num; i++) {
+        Var item = list.v.list[i];
+        enum Arg_Kind kind = is_node(item, S_splice) ? ARG_SPLICE : ARG_NORMAL;
+        Expr *expr = (kind == ARG_SPLICE ? expr_field(b, item, S_expr)
+                      : build_expr(b, item));
+
         if (!expr) {
-            return nullptr; // Invalid expression
+            at_index(b, i);
+            return 0;
         }
-        
-        *arg_ptr = alloc_arg_list(kind, expr);
-        arg_ptr = &(*arg_ptr)->next;
+        *tail = alloc_arg_list(kind, expr);
+        tail = &(*tail)->next;
     }
-    
-    return result;
+    return 1;
 }
 
-// Scatter helper functions
-static Var scatter_to_list(Scatter *scatter, Symtab *symtab) {
-    Var result = new_list(0);
-    int count = 0;
-    
-    for (Scatter *sc = scatter; sc; sc = sc->next) {
-        count++;
-        Var element = new_map();
-        
-        // Add kind field
-        const char *kind_str;
-        switch (sc->kind) {
-            case SCAT_REQUIRED: kind_str = "required"; break;
-            case SCAT_OPTIONAL: kind_str = "optional"; break;
-            case SCAT_REST: kind_str = "rest"; break;
-            default: kind_str = "unknown"; break;
-        }
-        element = mapinsert(element, str_dup_to_var("kind"), str_dup_to_var(kind_str));
-        
-        // Add id field (variable name)
-        element = mapinsert(element, str_dup_to_var("id"), Var::new_int(sc->id));
-        
-        // Add expr field (default value for optional)
-        if (sc->expr) {
-            element = mapinsert(element, str_dup_to_var("expr"), 
-                                expr_to_map_visitor(sc->expr, symtab));
-        }
-        
-        result = listinsert(result, element, count);
+static int
+args_field(Builder * b, Var map, Var key, Arg_List ** args)
+{
+    Var list;
+
+    if (!list_field(b, map, key, &list))
+        return 0;
+    if (!build_args(b, list, args)) {
+        at_key(b, key);
+        return 0;
     }
-    
-    return result;
+    return 1;
 }
 
-static Scatter *list_to_scatter(Var list, Symtab *symtab) {
-    if (list.type != TYPE_LIST) {
+/* The error codes of a catch expression or an except clause; null for ANY. */
+static int
+codes_field(Builder * b, Var map, Arg_List ** codes)
+{
+    Var list;
+    int ok;
+
+    *codes = nullptr;
+    if (!find(map, S_codes, &list))
+        return 1;
+    if ((ok = check_type(b, list, TYPE_LIST)) && list.v.list[0].v.num == 0) {
+        fail(b, "must not be empty; leave it out to catch ANY");
+        ok = 0;
+    }
+    if (!ok || !build_args(b, list, codes)) {
+        at_key(b, S_codes);
+        return 0;
+    }
+    return 1;
+}
+
+static int
+body_field(Builder * b, Var map, Var key, int optional, Stmt ** stmts)
+{
+    Var list;
+
+    *stmts = nullptr;
+    if (optional && !find(map, key, &list))
+        return 1;
+    if (!list_field(b, map, key, &list))
+        return 0;
+    if (!build_stmts(b, list, stmts)) {
+        at_key(b, key);
+        return 0;
+    }
+    return 1;
+}
+
+static Expr *
+build_literal(Builder * b, Var node)
+{
+    Var value;
+    Expr *expr;
+
+    if (!find_required(b, node, S_value, &value))
+        return nullptr;
+    switch (value.type) {
+        case TYPE_STR:
+            expr = alloc_var(TYPE_STR);
+            expr->e.var.v.str = alloc_string(value.v.str);
+            return expr;
+        case TYPE_INT:
+        case TYPE_FLOAT:
+        case TYPE_OBJ:
+        case TYPE_ERR:
+            expr = alloc_var(value.type);
+            expr->e.var = value;
+            return expr;
+        default:
+            fail(b, "a value of type %s cannot be written as a literal",
+                 parse_type(value.type));
+            at_key(b, S_value);
+            return nullptr;
+    }
+}
+
+static Expr *
+build_variable(Builder * b, Var node)
+{
+    Expr *expr;
+    int id;
+
+    if (!name_field(b, node, S_name, 0, &id))
+        return nullptr;
+    expr = alloc_expr(EXPR_ID);
+    expr->e.id = id;
+    return expr;
+}
+
+static Expr *
+build_operator(Builder * b, Var node, int arity)
+{
+    Var op;
+    Expr *lhs, *rhs, *expr;
+    unsigned i;
+
+    if (!find_required(b, node, S_op, &op))
+        return nullptr;
+    for (i = 0; i < Arraysize(operators); i++)
+        if (operators[i].arity == arity && op.type == TYPE_STR
+                && !strcmp(op.v.str, operators[i].op))
+            break;
+    if (i == Arraysize(operators)) {
+        fail(b, "not a %s operator", arity == 1 ? "unary" : "binary");
+        at_key(b, S_op);
         return nullptr;
     }
-    
-    Scatter *result = nullptr;
-    Scatter **last_ptr = &result;
-    
-    for (int i = 1; i <= list.v.list[0].v.num; i++) {
-        Var element = list.v.list[i];
-        if (element.type != TYPE_MAP) {
+    if (arity == 1) {
+        if (!(lhs = expr_field(b, node, S_expr)))
             return nullptr;
-        }
-        
-        Var kind_field, id_field, expr_field;
-        if (maplookup(element, str_dup_to_var("kind"), &kind_field, 0) == nullptr ||
-            maplookup(element, str_dup_to_var("id"), &id_field, 0) == nullptr) {
-            return nullptr;
-        }
-        
-        if (kind_field.type != TYPE_STR || id_field.type != TYPE_INT) {
-            return nullptr;
-        }
-        
+        expr = alloc_expr(operators[i].kind);
+        expr->e.expr = lhs;
+        return expr;
+    }
+    if (!(lhs = expr_field(b, node, S_lhs))
+            || !(rhs = expr_field(b, node, S_rhs)))
+        return nullptr;
+    return alloc_binary(operators[i].kind, lhs, rhs);
+}
+
+static Expr *
+build_binary(Builder * b, Var node)
+{
+    return build_operator(b, node, 2);
+}
+
+static Expr *
+build_unary(Builder * b, Var node)
+{
+    return build_operator(b, node, 1);
+}
+
+static Expr *
+build_prop(Builder * b, Var node)
+{
+    Expr *object, *property;
+
+    if (!(object = expr_field(b, node, S_object))
+            || !(property = expr_field(b, node, S_property)))
+        return nullptr;
+    return alloc_binary(EXPR_PROP, object, property);
+}
+
+static Expr *
+build_verb_call(Builder * b, Var node)
+{
+    Expr *object, *verb;
+    Arg_List *args;
+
+    if (!(object = expr_field(b, node, S_object))
+            || !(verb = expr_field(b, node, S_verb))
+            || !args_field(b, node, S_args, &args))
+        return nullptr;
+    return alloc_verb(object, verb, args);
+}
+
+static Expr *
+build_index(Builder * b, Var node)
+{
+    Expr *base, *index;
+
+    if (!(base = expr_field(b, node, S_base))
+            || !(index = expr_field(b, node, S_index)))
+        return nullptr;
+    return alloc_binary(EXPR_INDEX, base, index);
+}
+
+static Expr *
+build_range(Builder * b, Var node)
+{
+    Expr *base, *from, *to, *expr;
+
+    if (!(base = expr_field(b, node, S_base))
+            || !(from = expr_field(b, node, S_from))
+            || !(to = expr_field(b, node, S_to)))
+        return nullptr;
+    expr = alloc_expr(EXPR_RANGE);
+    expr->e.range.base = base;
+    expr->e.range.from = from;
+    expr->e.range.to = to;
+    return expr;
+}
+
+static Scatter *
+build_scatter_item(Builder * b, Var item)
+{
+    static const struct {
+        Var *name;
         enum Scatter_Kind kind;
-        if (strcmp(kind_field.v.str, "required") == 0) {
-            kind = SCAT_REQUIRED;
-        } else if (strcmp(kind_field.v.str, "optional") == 0) {
-            kind = SCAT_OPTIONAL;
-        } else if (strcmp(kind_field.v.str, "rest") == 0) {
-            kind = SCAT_REST;
-        } else {
+    } kinds[] = {
+        {&S_required, SCAT_REQUIRED},
+        {&S_optional, SCAT_OPTIONAL},
+        {&S_rest, SCAT_REST}
+    };
+    Var kind;
+    Expr *value;
+    unsigned i;
+    int id;
+
+    if (!check_type(b, item, TYPE_MAP)
+            || !find_required(b, item, S_kind, &kind))
+        return nullptr;
+    for (i = 0; i < Arraysize(kinds); i++)
+        if (kind.type == TYPE_STR && !strcmp(kind.v.str, kinds[i].name->v.str))
+            break;
+    if (i == Arraysize(kinds)) {
+        fail(b, "expected \"required\", \"optional\" or \"rest\"");
+        at_key(b, S_kind);
+        return nullptr;
+    }
+    if (!name_field(b, item, S_var, 0, &id)
+            || !optional_expr_field(b, item, S_default, &value))
+        return nullptr;
+    if (value && kinds[i].kind != SCAT_OPTIONAL) {
+        fail(b, "only an optional target can have a default");
+        return nullptr;
+    }
+    return alloc_scatter(kinds[i].kind, id, value);
+}
+
+static Expr *
+build_scatter(Builder * b, Var node)
+{
+    Var items;
+    Scatter *first = nullptr, **tail = &first;
+    Expr *expr;
+    int i;
+
+    if (!list_field(b, node, S_items, &items))
+        return nullptr;
+    for (i = 1; i <= items.v.list[0].v.num; i++) {
+        if (!(*tail = build_scatter_item(b, items.v.list[i]))) {
+            at_index(b, i);
+            at_key(b, S_items);
             return nullptr;
         }
-        
-        Expr *expr = nullptr;
-        if (maplookup(element, str_dup_to_var("expr"), &expr_field, 0) != nullptr) {
-            expr = map_to_expr_visitor(expr_field, symtab);
-            if (!expr && kind == SCAT_OPTIONAL) {
-                return nullptr; // Optional scatter with invalid default expr
-            }
-        }
-        
-        Scatter *sc = alloc_scatter(kind, id_field.v.num, expr);
-        *last_ptr = sc;
-        last_ptr = &sc->next;
+        tail = &(*tail)->next;
     }
-    
-    return result;
+    expr = alloc_expr(EXPR_SCATTER);
+    expr->e.scatter = first;
+    return expr;
 }
 
-/*********** Symbol Table Implementation ***********/
+/* The same test the parser applies to the left side of an assignment. */
+static int
+assignable(Expr * expr)
+{
+    if (expr->kind == EXPR_RANGE)
+        expr = expr->e.range.base;
+    while (expr->kind == EXPR_INDEX)
+        expr = expr->e.bin.lhs;
+    return expr->kind == EXPR_ID || expr->kind == EXPR_PROP;
+}
 
-Symtab *create_symtab(int num_names) {
-    if (num_names < 0) {
+static Expr *
+build_assign(Builder * b, Var node)
+{
+    Var target;
+    Expr *lhs, *rhs;
+
+    if (!find_required(b, node, S_target, &target))
+        return nullptr;
+    if (is_node(target, S_scatter))
+        lhs = build_scatter(b, target);
+    else if ((lhs = build_expr(b, target)) && !assignable(lhs)) {
+        fail(b, "cannot be assigned to");
+        lhs = nullptr;
+    }
+    if (!lhs) {
+        at_key(b, S_target);
         return nullptr;
     }
-    
-    Symtab *symtab = (Symtab *)mymalloc(sizeof(Symtab), M_AST);
-    symtab->num_names = num_names;
-    
-    if (num_names > 0) {
-        symtab->names = (char **)mymalloc(num_names * sizeof(char *), M_AST);
-        for (int i = 0; i < num_names; i++) {
-            symtab->names[i] = nullptr;
-        }
-    } else {
-        symtab->names = nullptr;
-    }
-    
-    return symtab;
+    if (!(rhs = expr_field(b, node, S_value)))
+        return nullptr;
+    return alloc_binary(EXPR_ASGN, lhs, rhs);
 }
 
-void free_symtab(Symtab *symtab) {
-    if (!symtab) {
-        return;
-    }
-    
-    if (symtab->names) {
-        for (int i = 0; i < symtab->num_names; i++) {
-            if (symtab->names[i]) {
-                free_str(symtab->names[i]);
-            }
-        }
-        myfree(symtab->names, M_AST);
-    }
-    
-    myfree(symtab, M_AST);
-}
+static Expr *
+build_call(Builder * b, Var node)
+{
+    Var name;
+    Arg_List *args;
+    Expr *expr;
+    unsigned func;
 
-int symtab_add_name(Symtab *symtab, const char *name) {
-    if (!symtab || !name) {
-        return -1;
-    }
-    
-    // Find first available slot
-    for (int i = 0; i < symtab->num_names; i++) {
-        if (symtab->names[i] == nullptr) {
-            symtab->names[i] = str_dup(name);
-            return i;
-        }
-    }
-    
-    // No available slots
-    return -1;
-}
-
-const char *symtab_get_name(Symtab *symtab, int id) {
-    if (!symtab || id < 0 || id >= symtab->num_names) {
+    if (!find_required(b, node, S_function, &name))
+        return nullptr;
+    if (name.type != TYPE_STR
+            || (func = number_func_by_name(name.v.str)) == FUNC_NOT_FOUND) {
+        fail(b, "not a built-in function");
+        at_key(b, S_function);
         return nullptr;
     }
-    
-    return symtab->names[id];
+    if (!args_field(b, node, S_args, &args))
+        return nullptr;
+    expr = alloc_expr(EXPR_CALL);
+    expr->e.call.func = func;
+    expr->e.call.args = args;
+    return expr;
 }
 
-/*********** Unparse Wrapper Functions ***********/
+static Expr *
+build_list(Builder * b, Var node)
+{
+    Arg_List *items;
+    Expr *expr;
 
-// Structure to collect unparse output into a Var list
-typedef struct {
-    Var *result;     // Pointer to the result list
-    int line_count;  // Current number of lines
-} unparse_collector;
-
-// Callback function to collect unparse output lines
-static void collect_unparse_line(void *data, const char *line) {
-    unparse_collector *collector = (unparse_collector *)data;
-    
-    // Extend the list to hold one more line
-    collector->line_count++;
-    *collector->result = listinsert(*collector->result, str_dup_to_var(line), collector->line_count);
+    if (!args_field(b, node, S_items, &items))
+        return nullptr;
+    expr = alloc_expr(EXPR_LIST);
+    expr->e.list = items;
+    return expr;
 }
 
-// Create minimal Program context for unparsing (needs variable names)
-static Program *create_minimal_program(Symtab *symtab) {
-    Program *prog = (Program *)mymalloc(sizeof(Program), M_PROGRAM);
-    memset(prog, 0, sizeof(Program));
-    
-    // Set up variable names array from symbol table
-    if (symtab && symtab->num_names > 0) {
-        prog->num_var_names = symtab->num_names;
-        prog->var_names = (const char **)mymalloc(symtab->num_names * sizeof(char *), M_NAMES);
-        
-        for (int i = 0; i < symtab->num_names; i++) {
-            prog->var_names[i] = symtab->names[i] ? symtab->names[i] : "";
+static Expr *
+build_map(Builder * b, Var node)
+{
+    Var entries;
+    Map_List *first = nullptr, **tail = &first;
+    Expr *key, *value, *expr;
+    int i;
+
+    if (!list_field(b, node, S_entries, &entries))
+        return nullptr;
+    for (i = 1; i <= entries.v.list[0].v.num; i++) {
+        Var entry = entries.v.list[i];
+
+        if (!check_type(b, entry, TYPE_MAP)
+                || !(key = expr_field(b, entry, S_key))
+                || !(value = expr_field(b, entry, S_value))) {
+            at_index(b, i);
+            at_key(b, S_entries);
+            return nullptr;
         }
-    } else {
-        prog->num_var_names = 0;
-        prog->var_names = nullptr;
+        *tail = alloc_map_list(key, value);
+        tail = &(*tail)->next;
     }
-    
-    return prog;
+    expr = alloc_expr(EXPR_MAP);
+    expr->e.map = first;
+    return expr;
 }
 
-// Free minimal Program context
-static void free_minimal_program(Program *prog) {
-    if (prog) {
-        if (prog->var_names) {
-            myfree(prog->var_names, M_NAMES);
+static Expr *
+build_conditional(Builder * b, Var node)
+{
+    Expr *condition, *consequent, *alternate, *expr;
+
+    if (!(condition = expr_field(b, node, S_condition))
+            || !(consequent = expr_field(b, node, S_consequent))
+            || !(alternate = expr_field(b, node, S_alternate)))
+        return nullptr;
+    expr = alloc_expr(EXPR_COND);
+    expr->e.cond.condition = condition;
+    expr->e.cond.consequent = consequent;
+    expr->e.cond.alternate = alternate;
+    return expr;
+}
+
+static Expr *
+build_catch(Builder * b, Var node)
+{
+    Expr *_try, *except, *expr;
+    Arg_List *codes;
+
+    if (!(_try = expr_field(b, node, S_expr))
+            || !codes_field(b, node, &codes)
+            || !optional_expr_field(b, node, S_default, &except))
+        return nullptr;
+    expr = alloc_expr(EXPR_CATCH);
+    expr->e._catch._try = _try;
+    expr->e._catch.codes = codes;
+    expr->e._catch.except = except;
+    return expr;
+}
+
+static Expr *
+build_first(Builder * b, Var node)
+{
+    return alloc_expr(EXPR_FIRST);
+}
+
+static Expr *
+build_last(Builder * b, Var node)
+{
+    return alloc_expr(EXPR_LAST);
+}
+
+static Expr *
+build_misplaced_scatter(Builder * b, Var node)
+{
+    fail(b, "a scatter can only be the target of an assignment");
+    return nullptr;
+}
+
+static Expr *
+build_misplaced_splice(Builder * b, Var node)
+{
+    fail(b, "a splice can only appear in an argument list or a list");
+    return nullptr;
+}
+
+static const struct {
+    Var *type;
+    Expr *(*build) (Builder *, Var);
+} expr_builders[] = {
+    {&S_literal, build_literal},
+    {&S_variable, build_variable},
+    {&S_binary, build_binary},
+    {&S_unary, build_unary},
+    {&S_prop, build_prop},
+    {&S_verb_call, build_verb_call},
+    {&S_index, build_index},
+    {&S_range, build_range},
+    {&S_assign, build_assign},
+    {&S_call, build_call},
+    {&S_list, build_list},
+    {&S_map, build_map},
+    {&S_conditional, build_conditional},
+    {&S_catch, build_catch},
+    {&S_first, build_first},
+    {&S_last, build_last},
+    {&S_scatter, build_misplaced_scatter},
+    {&S_splice, build_misplaced_splice}
+};
+
+static Expr *
+build_expr(Builder * b, Var value)
+{
+    const char *type = node_type(b, value);
+    Expr *expr = nullptr;
+    unsigned i;
+
+    if (!type)
+        return nullptr;
+    if (++b->depth > AST_MAX_DEPTH)
+        fail(b, "nested more than %d levels deep", AST_MAX_DEPTH);
+    else {
+        for (i = 0; i < Arraysize(expr_builders); i++)
+            if (!strcmp(type, expr_builders[i].type->v.str))
+                break;
+        if (i < Arraysize(expr_builders))
+            expr = (*expr_builders[i].build) (b, value);
+        else
+            fail(b, "\"%s\" is not an expression", type);
+    }
+    b->depth--;
+    return expr;
+}
+
+static Stmt *
+build_if(Builder * b, Var node)
+{
+    Var arms;
+    Cond_Arm *first = nullptr, **tail = &first;
+    Stmt *body, *stmt;
+    Expr *condition;
+    int i;
+
+    if (!list_field(b, node, S_arms, &arms))
+        return nullptr;
+    if (arms.v.list[0].v.num == 0) {
+        fail(b, "must not be empty");
+        at_key(b, S_arms);
+        return nullptr;
+    }
+    for (i = 1; i <= arms.v.list[0].v.num; i++) {
+        Var arm = arms.v.list[i];
+
+        if (!check_type(b, arm, TYPE_MAP)
+                || !(condition = expr_field(b, arm, S_condition))
+                || !body_field(b, arm, S_body, 0, &body)) {
+            at_index(b, i);
+            at_key(b, S_arms);
+            return nullptr;
         }
-        myfree(prog, M_PROGRAM);
+        *tail = alloc_cond_arm(condition, body);
+        tail = &(*tail)->next;
     }
+    if (!body_field(b, node, S_else, 1, &body))
+        return nullptr;
+    stmt = alloc_stmt(STMT_COND);
+    stmt->s.cond.arms = first;
+    stmt->s.cond.otherwise = body;
+    return stmt;
 }
 
-// Helper functions removed - now using integrated unparse.cc functionality
+static Stmt *
+build_for(Builder * b, Var node)
+{
+    Stmt *body, *stmt;
+    Expr *expr;
+    int id, index;
 
-// Expression unparsing now handled by unparse.cc integration
-
-// Add a public function to unparse.cc for statement unparsing
-extern char *unparse_stmt_to_string(Stmt *stmt, Symtab *symtab);
-
-
-/*********** AST Builtin Functions ***********/
-
-
-// Global variables to capture AST during parsing  
-static Var captured_ast;
-static bool ast_capture_success = false;
-static bool ast_capture_initialized = false;
-
-static void init_ast_capture() {
-    if (!ast_capture_initialized) {
-        captured_ast.type = TYPE_NONE;
-        ast_capture_initialized = true;
-    }
+    if (!name_field(b, node, S_var, 0, &id)
+            || !name_field(b, node, S_index, 1, &index)
+            || !(expr = expr_field(b, node, S_expr))
+            || !body_field(b, node, S_body, 0, &body))
+        return nullptr;
+    stmt = alloc_stmt(STMT_LIST);
+    stmt->s.list.id = id;
+    stmt->s.list.index = index;
+    stmt->s.list.expr = expr;
+    stmt->s.list.body = body;
+    return stmt;
 }
 
-// Parser function from parser.h
-extern Program *parse_list_as_program(Var code, Var *errors);
+static Stmt *
+build_for_range(Builder * b, Var node)
+{
+    Stmt *body, *stmt;
+    Expr *from, *to;
+    int id;
 
-// AST capture callback function
-static void ast_capture_callback(Stmt *prog_start, Names *local_names, DB_Version version) {
-    if (!prog_start) {
-        ast_capture_success = false;
-        return;
+    if (!name_field(b, node, S_var, 0, &id)
+            || !(from = expr_field(b, node, S_from))
+            || !(to = expr_field(b, node, S_to))
+            || !body_field(b, node, S_body, 0, &body))
+        return nullptr;
+    stmt = alloc_stmt(STMT_RANGE);
+    stmt->s.range.id = id;
+    stmt->s.range.from = from;
+    stmt->s.range.to = to;
+    stmt->s.range.body = body;
+    return stmt;
+}
+
+static Stmt *
+build_while(Builder * b, Var node)
+{
+    Stmt *body, *stmt;
+    Expr *condition;
+    int id;
+
+    if (!name_field(b, node, S_name, 1, &id)
+            || !(condition = expr_field(b, node, S_condition))
+            || !body_field(b, node, S_body, 0, &body))
+        return nullptr;
+    stmt = alloc_stmt(STMT_WHILE);
+    stmt->s.loop.id = id;
+    stmt->s.loop.condition = condition;
+    stmt->s.loop.body = body;
+    return stmt;
+}
+
+static Stmt *
+build_fork(Builder * b, Var node)
+{
+    Stmt *body, *stmt;
+    Expr *delay;
+    int id;
+
+    if (!name_field(b, node, S_var, 1, &id)
+            || !(delay = expr_field(b, node, S_delay))
+            || !body_field(b, node, S_body, 0, &body))
+        return nullptr;
+    stmt = alloc_stmt(STMT_FORK);
+    stmt->s.fork.id = id;
+    stmt->s.fork.time = delay;
+    stmt->s.fork.body = body;
+    return stmt;
+}
+
+static Stmt *
+build_expr_stmt(Builder * b, Var node)
+{
+    Stmt *stmt;
+    Expr *expr;
+
+    if (!(expr = expr_field(b, node, S_expr)))
+        return nullptr;
+    stmt = alloc_stmt(STMT_EXPR);
+    stmt->s.expr = expr;
+    return stmt;
+}
+
+static Stmt *
+build_return(Builder * b, Var node)
+{
+    Stmt *stmt;
+    Expr *value;
+
+    if (!optional_expr_field(b, node, S_value, &value))
+        return nullptr;
+    stmt = alloc_stmt(STMT_RETURN);
+    stmt->s.expr = value;
+    return stmt;
+}
+
+static Stmt *
+build_try_except(Builder * b, Var node)
+{
+    Var excepts;
+    Except_Arm *first = nullptr, **tail = &first;
+    Stmt *body, *handler, *stmt;
+    Arg_List *codes;
+    int i, id;
+
+    if (!body_field(b, node, S_body, 0, &body)
+            || !list_field(b, node, S_excepts, &excepts))
+        return nullptr;
+    if (excepts.v.list[0].v.num == 0) {
+        fail(b, "must not be empty");
+        at_key(b, S_excepts);
+        return nullptr;
     }
-    
-    // Create symbol table from local_names
-    Symtab *symtab = create_symtab(local_names ? local_names->size : 0);
-    if (local_names) {
-        for (int i = 0; i < local_names->size; i++) {
-            if (local_names->names[i]) {
-                symtab->names[i] = str_dup(local_names->names[i]);
-            }
+    for (i = 1; i <= excepts.v.list[0].v.num; i++) {
+        Var except = excepts.v.list[i];
+
+        if (!check_type(b, except, TYPE_MAP)
+                || !name_field(b, except, S_var, 1, &id)
+                || !codes_field(b, except, &codes)
+                || !body_field(b, except, S_body, 0, &handler)) {
+            at_index(b, i);
+            at_key(b, S_excepts);
+            return nullptr;
         }
+        *tail = alloc_except(id, codes, handler);
+        tail = &(*tail)->next;
     }
-    
-    // Convert AST to MAP while it's still in memory
-    Var result = stmt_to_map_visitor(prog_start, symtab);
-    
-    // Add metadata
-    result = mapinsert(result, str_dup_to_var("ast_version"), Var::new_int(AST_SCHEMA_VERSION));
-    
-    if (local_names && local_names->size > 0) {
-        Var var_names = new_list(local_names->size);
-        for (int i = 0; i < local_names->size; i++) {
-            var_names.v.list[i+1] = str_dup_to_var(local_names->names[i] ? local_names->names[i] : "");
+    stmt = alloc_stmt(STMT_TRY_EXCEPT);
+    stmt->s._catch.body = body;
+    stmt->s._catch.excepts = first;
+    return stmt;
+}
+
+static Stmt *
+build_try_finally(Builder * b, Var node)
+{
+    Stmt *body, *handler, *stmt;
+
+    if (!body_field(b, node, S_body, 0, &body)
+            || !body_field(b, node, S_finally, 0, &handler))
+        return nullptr;
+    stmt = alloc_stmt(STMT_TRY_FINALLY);
+    stmt->s.finally.body = body;
+    stmt->s.finally.handler = handler;
+    return stmt;
+}
+
+static Stmt *
+build_loop_exit(Builder * b, Var node, enum Stmt_Kind kind)
+{
+    Stmt *stmt;
+    int id;
+
+    if (!name_field(b, node, S_name, 1, &id))
+        return nullptr;
+    stmt = alloc_stmt(kind);
+    stmt->s.exit = id;
+    return stmt;
+}
+
+static Stmt *
+build_break(Builder * b, Var node)
+{
+    return build_loop_exit(b, node, STMT_BREAK);
+}
+
+static Stmt *
+build_continue(Builder * b, Var node)
+{
+    return build_loop_exit(b, node, STMT_CONTINUE);
+}
+
+static const struct {
+    Var *type;
+    Stmt *(*build) (Builder *, Var);
+} stmt_builders[] = {
+    {&S_if, build_if},
+    {&S_for, build_for},
+    {&S_for_range, build_for_range},
+    {&S_while, build_while},
+    {&S_fork, build_fork},
+    {&S_expr, build_expr_stmt},
+    {&S_return, build_return},
+    {&S_try_except, build_try_except},
+    {&S_try_finally, build_try_finally},
+    {&S_break, build_break},
+    {&S_continue, build_continue}
+};
+
+static Stmt *
+build_stmt(Builder * b, Var value)
+{
+    const char *type = node_type(b, value);
+    Stmt *stmt = nullptr;
+    unsigned i;
+
+    if (!type)
+        return nullptr;
+    if (++b->depth > AST_MAX_DEPTH)
+        fail(b, "nested more than %d levels deep", AST_MAX_DEPTH);
+    else {
+        for (i = 0; i < Arraysize(stmt_builders); i++)
+            if (!strcmp(type, stmt_builders[i].type->v.str))
+                break;
+        if (i < Arraysize(stmt_builders))
+            stmt = (*stmt_builders[i].build) (b, value);
+        else
+            fail(b, "\"%s\" is not a statement", type);
+    }
+    b->depth--;
+    return stmt;
+}
+
+static int
+build_stmts(Builder * b, Var list, Stmt ** stmts)
+{
+    Stmt **tail = stmts;
+    int i;
+
+    *stmts = nullptr;
+    for (i = 1; i <= list.v.list[0].v.num; i++) {
+        if (!(*tail = build_stmt(b, list.v.list[i]))) {
+            at_index(b, i);
+            return 0;
         }
-        result = mapinsert(result, str_dup_to_var("variables"), var_names);
+        tail = &(*tail)->next;
     }
-    
-    // Clean up symbol table
-    free_symtab(symtab);
-    
-    // Save result globally
-    if (captured_ast.type != TYPE_NONE) {
-        free_var(captured_ast);
-    }
-    captured_ast = result;
-    ast_capture_success = true;
+    return 1;
 }
 
-// Real AST capture using parser callback
-Var parse_list_as_ast(Var code, Var *errors) {
-    // Initialize if needed
-    init_ast_capture();
-    
-    // Reset capture state
-    ast_capture_success = false;
-    if (captured_ast.type != TYPE_NONE) {
-        free_var(captured_ast);
-        captured_ast.type = TYPE_NONE;
-    }
-    
-    // Set up callback to capture AST
-    set_ast_capture_callback(ast_capture_callback);
-    
-    // Parse using existing function - callback will capture AST
-    Program *program = parse_list_as_program(code, errors);
-    
-    // Clear callback
-    set_ast_capture_callback(NULL);
-    
-    // Check if AST was captured successfully
-    if (ast_capture_success && captured_ast.type != TYPE_NONE) {
-        // Return captured AST
-        Var result = captured_ast;
-        captured_ast.type = TYPE_NONE; // Don't free it since we're returning it
-        
-        if (program) free_program(program);
-        return result;
-    } else {
-        // Parse failed or callback didn't fire - return empty MAP
-        if (program) free_program(program);
-        return new_map();
-    }
+/*
+ * Build the statements of `ast'.  On success the caller owns `*stmts' and
+ * `b->names'; on failure there is nothing to free and `b' says what went
+ * wrong.
+ */
+static int
+ast_to_stmts(Builder * b, Var ast, Stmt ** stmts)
+{
+    int ok;
+
+    b->names = new_builtin_names(current_db_version);
+    b->depth = 0;
+    begin_code_allocation();
+    ok = check_type(b, ast, TYPE_LIST) && build_stmts(b, ast, stmts);
+    end_code_allocation(!ok);
+    if (!ok)
+        free_names(b->names);
+    return ok;
 }
 
-static package bf_parse_ast(Var arglist, Byte next, void *vdata, Objid progr) {
-    
-    // Validate arguments: parse_ast(code_list)
-    if (arglist.v.list[0].v.num != 1) {
-        return make_error_pack(E_ARGS);
-    }
-    
+/********** built-in functions **********/
+
+static void
+add_line(void *data, const char *line)
+{
+    Var *code = (Var *) data;
+
+    *code = listappend(*code, str_dup_to_var(line));
+}
+
+static package
+bf_parse_ast(Var arglist, Byte next, void *vdata, Objid progr)
+{   /* (code) */
     Var code = arglist.v.list[1];
-    if (code.type != TYPE_LIST) {
-        free_var(arglist);
-        return make_error_pack(E_TYPE);
-    }
-    
-    // Check permissions (wizard-only for now)
-    if (!is_wizard(progr)) {
-        free_var(arglist);
-        return make_error_pack(E_PERM);
-    }
-    
-    // Use real AST capture
-    Var errors;
-    Var result = parse_list_as_ast(code, &errors);
-    
-    // Check if parsing succeeded
-    Var parse_error_var;
-    if (maplookup(result, str_dup_to_var("parse_error"), &parse_error_var, 0) != nullptr) {
-        // Parse error occurred
-        if (errors.type == TYPE_LIST && errors.v.list[0].v.num > 0) {
-            // Return first error message
-            free_var(result);
-            free_var(errors);
+    Var errors, ast;
+    Program *program;
+    int i;
+
+    for (i = 1; i <= code.v.list[0].v.num; i++)
+        if (code.v.list[i].type != TYPE_STR) {
             free_var(arglist);
-            return make_error_pack(E_INVARG);
-        } else {
-            // Generic parse error
-            free_var(result);
-            free_var(errors);
-            free_var(arglist);
-            return make_error_pack(E_INVARG);
+            return make_error_pack(E_TYPE);
         }
-    }
-    
-    // Success - return AST
+    program = parse_list_as_program(code, &errors);
+    free_var(arglist);
+
+    if (!program)
+        return make_raise_pack(E_INVARG, errors.v.list[0].v.num > 0
+                               ? errors.v.list[1].v.str : "Parse error",
+                               errors);
     free_var(errors);
-    free_var(arglist);
-    return make_var_pack(result);
+    ast = program_to_ast(program);
+    free_program(program);
+
+    return make_var_pack(ast);
 }
 
-static package bf_unparse_ast(Var arglist, Byte next, void *vdata, Objid progr) {
-    // Validate arguments
-    if (arglist.v.list[0].v.num != 1) {
-        free_var(arglist);
-        return make_error_pack(E_ARGS);
-    }
-    
-    Var ast_map = arglist.v.list[1];
-    if (ast_map.type != TYPE_MAP) {
-        free_var(arglist);
-        return make_error_pack(E_TYPE);
-    }
-    
-    // Validate AST MAP version
-    if (!validate_version(ast_map)) {
-        free_var(arglist);
-        return make_error_pack(E_INVARG);
-    }
-    
-    // Allocate AST in temporary pool 
-    begin_code_allocation();
-    
-    // Extract symbol table from AST MAP (after starting allocation tracking)
-    Symtab *symtab = extract_symtab_from_map(ast_map);
-    
-    Stmt *stmt = map_to_stmt(ast_map, symtab);
-    if (!stmt) {
-        end_code_allocation(1);  // Abort and clean up everything
-        return make_error_pack(E_INVARG);
-    }
-    
-    // Use the new unparse_stmt_to_string function
-    char *unparsed_code = unparse_stmt_to_string(stmt, symtab);
-    
-    // Create result list by splitting multi-line string into separate lines
-    Var result_list = new_list(0);
-    if (unparsed_code && strlen(unparsed_code) > 0) {
-        // Split the string on newlines
-        char *line_start = unparsed_code;
-        char *line_end;
-        
-        while ((line_end = strchr(line_start, '\n')) != nullptr) {
-            // Create string for this line
-            int line_len = line_end - line_start;
-            char *line_str = (char *)mymalloc(line_len + 1, M_STRING);
-            strncpy(line_str, line_start, line_len);
-            line_str[line_len] = '\0';
-            
-            Var line_var = str_dup_to_var(line_str);
-            result_list = listappend(result_list, line_var);
-            
-            myfree(line_str, M_STRING);
-            line_start = line_end + 1;
-        }
-        
-        // Handle the last line (if no trailing newline)
-        if (*line_start != '\0') {
-            Var line_var = str_dup_to_var(line_start);
-            result_list = listappend(result_list, line_var);
-        }
-    }
-    
-    // Free the string
-    if (unparsed_code) {
-        myfree(unparsed_code, M_STRING);
-    }
-    
-    end_code_allocation(1);  // Clean up AST allocations
+static package
+bf_unparse_ast(Var arglist, Byte next, void *vdata, Objid progr)
+{   /* (ast [, fully-paren [, indent]]) */
+    int nargs = arglist.v.list[0].v.num;
+    int parens = nargs >= 2 && is_true(arglist.v.list[2]);
+    int indent = nargs < 3 || is_true(arglist.v.list[3]);
+    Builder b;
+    Stmt *stmts;
+    Var code;
+    int ok = ast_to_stmts(&b, arglist.v.list[1], &stmts);
+
     free_var(arglist);
-    
-    return make_var_pack(result_list);
+    if (!ok) {
+        std::string message = "Invalid AST";
+
+        if (b.path.length() > 200)
+            b.path.replace(200, std::string::npos, "...");
+        if (!b.path.empty())
+            message += " at " + b.path;
+        message += ": " + b.error;
+        return make_raise_pack(E_INVARG, message.c_str(), var_ref(zero));
+    }
+
+    code = new_list(0);
+    unparse_stmts(stmts, b.names->names, add_line, &code, parens, indent);
+    free_stmt(stmts);
+    free_names(b.names);
+
+    return make_var_pack(code);
 }
 
-static package bf_validate_ast(Var arglist, Byte next, void *vdata, Objid progr) {
-    // Validate arguments
-    if (arglist.v.list[0].v.num != 1) {
-        free_var(arglist);
-        return make_error_pack(E_ARGS);
-    }
-    
-    Var ast_map = arglist.v.list[1];
-    if (ast_map.type != TYPE_MAP) {
-        free_var(arglist);
-        return make_var_pack(Var::new_int(0)); // Invalid
-    }
-    
-    // Check version compatibility
-    if (!validate_version(ast_map)) {
-        free_var(arglist);
-        return make_var_pack(Var::new_int(0)); // Invalid
-    }
-    
-    // Try to convert MAP to AST to validate structure
-    Symtab *symtab = create_symtab(0);
-    begin_code_allocation();
-    
-    Stmt *stmt = map_to_stmt(ast_map, symtab);
-    int is_valid = (stmt != nullptr) ? 1 : 0;
-    
-    end_code_allocation(0);  // Clean up
-    free_symtab(symtab);
+static package
+bf_validate_ast(Var arglist, Byte next, void *vdata, Objid progr)
+{   /* (ast) */
+    Builder b;
+    Stmt *stmts;
+    int ok = ast_to_stmts(&b, arglist.v.list[1], &stmts);
+
     free_var(arglist);
-    
-    return make_var_pack(Var::new_int(is_valid));
+    if (ok) {
+        free_stmt(stmts);
+        free_names(b.names);
+    }
+
+    return make_var_pack(Var::new_int(ok));
 }
 
-void register_ast(void) {
+void
+register_ast(void)
+{
+    unsigned i;
+
+#define CREATE_STRING(s) S_##s = str_dup_to_var(#s);
+    AST_STRINGS(CREATE_STRING)
+#undef CREATE_STRING
+
+    for (i = 0; i < Arraysize(operators); i++) {
+        operator_arity[operators[i].kind] = operators[i].arity;
+        operator_name[operators[i].kind] = str_dup_to_var(operators[i].op);
+    }
+
     register_function("parse_ast", 1, 1, bf_parse_ast, TYPE_LIST);
-    register_function("unparse_ast", 1, 1, bf_unparse_ast, TYPE_MAP);
-    register_function("validate_ast", 1, 1, bf_validate_ast, TYPE_MAP);
+    register_function("unparse_ast", 1, 3, bf_unparse_ast,
+                      TYPE_LIST, TYPE_ANY, TYPE_ANY);
+    register_function("validate_ast", 1, 1, bf_validate_ast, TYPE_ANY);
 }

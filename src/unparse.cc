@@ -32,7 +32,7 @@
 #include "streams.h"
 #include "utils.h"
 
-static Program *prog;
+static const char **var_names;
 
 const char *
 unparse_error(enum error e)
@@ -423,9 +423,9 @@ static void
 unparse_stmt_list(Stream * str, struct Stmt_List list, int indent)
 {
     if (list.index > -1)
-        stream_printf(str, "for %s, %s in (", prog->var_names[list.id], prog->var_names[list.index]);
+        stream_printf(str, "for %s, %s in (", var_names[list.id], var_names[list.index]);
     else
-        stream_printf(str, "for %s in (", prog->var_names[list.id]);
+        stream_printf(str, "for %s in (", var_names[list.id]);
     unparse_expr(str, list.expr);
     stream_add_char(str, ')');
     output(str);
@@ -438,7 +438,7 @@ unparse_stmt_list(Stream * str, struct Stmt_List list, int indent)
 static void
 unparse_stmt_range(Stream * str, struct Stmt_Range range, int indent)
 {
-    stream_printf(str, "for %s in [", prog->var_names[range.id]);
+    stream_printf(str, "for %s in [", var_names[range.id]);
     unparse_expr(str, range.from);
     stream_add_string(str, "..");
     unparse_expr(str, range.to);
@@ -454,7 +454,7 @@ static void
 unparse_stmt_fork(Stream * str, struct Stmt_Fork fork_stmt, int indent)
 {
     if (fork_stmt.id >= 0)
-        stream_printf(str, "fork %s (", prog->var_names[fork_stmt.id]);
+        stream_printf(str, "fork %s (", var_names[fork_stmt.id]);
     else
         stream_add_string(str, "fork (");
     unparse_expr(str, fork_stmt.time);
@@ -478,7 +478,7 @@ unparse_stmt_catch(Stream * str, struct Stmt_Catch _catch, int indent)
         indent_stmt(str, indent);
         stream_add_string(str, "except ");
         if (ex->id >= 0)
-            stream_printf(str, "%s ", prog->var_names[ex->id]);
+            stream_printf(str, "%s ", var_names[ex->id]);
         stream_add_char(str, '(');
         if (ex->codes)
             unparse_arglist(str, ex->codes);
@@ -523,7 +523,7 @@ unparse_stmt(Stmt * stmt, int indent)
                     stream_add_string(str, "while (");
                 else
                     stream_printf(str, "while %s (",
-                                  prog->var_names[stmt->s.loop.id]);
+                                  var_names[stmt->s.loop.id]);
                 unparse_expr(str, stmt->s.loop.condition);
                 stream_add_char(str, ')');
                 output(str);
@@ -566,7 +566,7 @@ unparse_stmt(Stmt * stmt, int indent)
                     stream_printf(str, "%s;", kwd);
                 else
                     stream_printf(str, "%s %s;", kwd,
-                                  prog->var_names[stmt->s.exit]);
+                                  var_names[stmt->s.exit]);
                 output(str);
             }
             break;
@@ -582,7 +582,7 @@ unparse_stmt(Stmt * stmt, int indent)
     free_stream(str);
 }
 
-static int
+int
 ok_identifier(const char *name)
 {
     const char *p = name;
@@ -748,7 +748,7 @@ unparse_expr(Stream * str, Expr * expr)
             break;
 
         case EXPR_ID:
-            stream_add_string(str, prog->var_names[expr->e.id]);
+            stream_add_string(str, var_names[expr->e.id]);
             break;
 
         case EXPR_LIST:
@@ -835,10 +835,10 @@ unparse_scatter(Stream * str, Scatter * sc)
                 stream_add_char(str, '@');
             /* fall thru to ... */
             case SCAT_REQUIRED:
-                stream_add_string(str, prog->var_names[sc->id]);
+                stream_add_string(str, var_names[sc->id]);
                 break;
             case SCAT_OPTIONAL:
-                stream_printf(str, "?%s", prog->var_names[sc->id]);
+                stream_printf(str, "?%s", var_names[sc->id]);
                 if (sc->expr) {
                     stream_add_string(str, " = ");
                     unparse_expr(str, sc->expr);
@@ -851,15 +851,23 @@ unparse_scatter(Stream * str, Scatter * sc)
 }
 
 void
+unparse_stmts(Stmt * stmts, const char **names, Unparser_Receiver r,
+              void *data, int fully_parenthesize, int indent_lines)
+{
+    var_names = names;
+    receiver = r;
+    receiver_data = data;
+    list_prg(stmts, fully_parenthesize, indent_lines);
+}
+
+void
 unparse_program(Program * p, Unparser_Receiver r, void *data,
                 int fully_parenthesize, int indent_lines, int f_index)
 {
     Stmt *stmt = decompile_program(p, f_index);
 
-    prog = p;
-    receiver = r;
-    receiver_data = data;
-    list_prg(stmt, fully_parenthesize, indent_lines);
+    unparse_stmts(stmt, p->var_names, r, data, fully_parenthesize,
+                  indent_lines);
     free_stmt(stmt);
 }
 
@@ -884,152 +892,4 @@ unparse_to_stderr(Program * p, int fully_parenthesize, int indent_lines,
                   int f_index)
 {
     unparse_to_file(stderr, p, fully_parenthesize, indent_lines, f_index);
-}
-
-char *
-unparse_expr_to_string(Expr *expr, Symtab *symtab)
-{
-    if (!expr) {
-        return str_dup("");
-    }
-
-    // Save current global state
-    Program *saved_prog = prog;
-    
-    // Create minimal program structure on stack - no AST allocation needed  
-    Program temp_program;
-    memset(&temp_program, 0, sizeof(Program));
-    temp_program.version = DBV_Prehistory;  // Set minimal valid DB version
-    
-    // Set up variable names from symbol table if provided
-    if (symtab && symtab->num_names > 0) {
-        temp_program.num_var_names = symtab->num_names;
-        temp_program.var_names = (const char **)mymalloc(symtab->num_names * sizeof(char *), M_NAMES);
-        
-        for (int i = 0; i < symtab->num_names; i++) {
-            temp_program.var_names[i] = symtab->names[i] ? symtab->names[i] : "";
-        }
-    } else {
-        temp_program.num_var_names = 0;
-        temp_program.var_names = nullptr;
-    }
-    
-    // Set our temporary program as global
-    prog = &temp_program;
-    
-    // Initialize expression tables if not already done
-    if (!expr_tables_initialized)
-        init_expr_tables();
-    
-    // Create stream and unparse the expression
-    Stream *str = new_stream(100);
-    unparse_expr(str, expr);
-    
-    // Extract the result
-    char *result = str_dup(stream_contents(str));
-    
-    // Clean up
-    free_stream(str);
-    prog = saved_prog;  // Restore previous global state
-    
-    // Clean up our temporary allocation
-    if (symtab && symtab->num_names > 0) {
-        myfree(temp_program.var_names, M_NAMES);
-    }
-    
-    return result;
-}
-
-// String collector for unparse_stmt_to_string
-typedef struct {
-    char *result;
-    int length;
-    int allocated;
-} string_collector;
-
-static void collect_stmt_line(void *data, const char *line) {
-    string_collector *collector = (string_collector *)data;
-    int line_len = strlen(line);
-    int new_len = collector->length + line_len + 1; // +1 for newline
-    
-    // Expand buffer if needed
-    if (new_len >= collector->allocated) {
-        collector->allocated = new_len * 2;
-        collector->result = (char *)myrealloc(collector->result, collector->allocated, M_STRING);
-    }
-    
-    // Append line with newline
-    strcpy(collector->result + collector->length, line);
-    collector->length += line_len;
-    collector->result[collector->length] = '\n';
-    collector->length++;
-    collector->result[collector->length] = '\0';
-}
-
-char *
-unparse_stmt_to_string(Stmt *stmt, Symtab *symtab)
-{
-    if (!stmt) {
-        return str_dup("");
-    }
-    
-    // Save current global state
-    Program *saved_prog = prog;
-    Unparser_Receiver saved_receiver = receiver;
-    void *saved_receiver_data = receiver_data;
-    
-    // Create minimal program structure on stack - no AST allocation needed  
-    Program temp_program;
-    memset(&temp_program, 0, sizeof(Program));
-    temp_program.version = DBV_Prehistory;  // Set minimal valid DB version
-    
-    // Set up variable names from symbol table if provided
-    if (symtab && symtab->num_names > 0) {
-        temp_program.num_var_names = symtab->num_names;
-        temp_program.var_names = (const char **)mymalloc(symtab->num_names * sizeof(char *), M_NAMES);
-        
-        for (int i = 0; i < symtab->num_names; i++) {
-            temp_program.var_names[i] = symtab->names[i] ? symtab->names[i] : "";
-        }
-    } else {
-        temp_program.num_var_names = 0;
-        temp_program.var_names = nullptr;
-    }
-    
-    // Set our temporary program as global
-    prog = &temp_program;
-    
-    // Initialize expression tables if not already done
-    if (!expr_tables_initialized)
-        init_expr_tables();
-    
-    // Set up string collector
-    string_collector collector;
-    collector.result = (char *)mymalloc(1000, M_STRING);
-    collector.result[0] = '\0';
-    collector.length = 0;
-    collector.allocated = 1000;
-    
-    receiver = collect_stmt_line;
-    receiver_data = &collector;
-    
-    // Unparse the statement 
-    unparse_stmt(stmt, 0);
-    
-    // Remove trailing newline if present
-    if (collector.length > 0 && collector.result[collector.length - 1] == '\n') {
-        collector.result[collector.length - 1] = '\0';
-    }
-    
-    // Restore globals
-    prog = saved_prog;
-    receiver = saved_receiver;
-    receiver_data = saved_receiver_data;
-    
-    // Clean up our temporary allocation
-    if (temp_program.var_names) {
-        myfree(temp_program.var_names, M_NAMES);
-    }
-    
-    return collector.result;
 }
