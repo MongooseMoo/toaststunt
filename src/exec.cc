@@ -86,8 +86,16 @@ static sigset_t block_sigchld;
 
 static Stream *logmsg = new_stream(30);
 
-#define BLOCK_SIGCHLD sigprocmask(SIG_BLOCK, &block_sigchld, NULL)
-#define UNBLOCK_SIGCHLD sigprocmask(SIG_UNBLOCK, &block_sigchld, NULL)
+/* These keep the SIGCHLD handler out while the main thread reads or
+ * changes `process_table'.  The server has other threads, so the mask
+ * is set with pthread_sigmask(); sigprocmask() is unspecified in a
+ * multithreaded process.  The other threads are started with SIGCHLD
+ * blocked (see init_pool_without_sigchld() in background.cc), so the
+ * main thread is the only one that ever runs the handler, and blocking
+ * the signal here really does exclude it.
+ */
+#define BLOCK_SIGCHLD pthread_sigmask(SIG_BLOCK, &block_sigchld, NULL)
+#define UNBLOCK_SIGCHLD pthread_sigmask(SIG_UNBLOCK, &block_sigchld, NULL)
 
 static task_waiting_on_exec *
 malloc_task_waiting_on_exec()
@@ -98,6 +106,16 @@ malloc_task_waiting_on_exec()
     tw->args = nullptr;
     tw->in = nullptr;
     tw->env = nullptr;
+    tw->len = 0;
+    /* No child yet: a pid of 0 matches no reaped child in
+     * exec_complete(), and -1 marks a descriptor that was never opened
+     * so that free_task_waiting_on_exec() leaves it alone.
+     */
+    tw->pid = 0;
+    tw->fin = -1;
+    tw->fout = -1;
+    tw->ferr = -1;
+    tw->the_vm = nullptr;
     tw->status = TWS_CONTINUE;
     tw->code = 0;
     tw->sout = new_stream(1000);
@@ -124,10 +142,17 @@ free_task_waiting_on_exec(task_waiting_on_exec * tw)
     }
     if (tw->in)
         free_str(tw->in);
-    close(tw->fout);
-    close(tw->ferr);
-    network_unregister_fd(tw->fout);
-    network_unregister_fd(tw->ferr);
+    /* Stop the network loop watching each pipe before closing it: once
+     * closed, the descriptor number can be handed to a new connection.
+     */
+    if (tw->fout >= 0) {
+        network_unregister_fd(tw->fout);
+        close(tw->fout);
+    }
+    if (tw->ferr >= 0) {
+        network_unregister_fd(tw->ferr);
+        close(tw->ferr);
+    }
     if (tw->sout)
         free_stream(tw->sout);
     if (tw->serr)
@@ -176,26 +201,41 @@ write_all(int fd, const char *buffer, size_t length)
     return 1;
 }
 
+/* Move whatever the child has written to `fd' into `stream'.
+ *
+ * A read of 0 bytes is end-of-file: the child has closed its end and
+ * there will never be more.  A pipe at end-of-file is always "readable",
+ * so the network loop must stop watching it, or its poll returns at once
+ * for ever and the server spins.  The descriptor itself stays open until
+ * free_task_waiting_on_exec() closes it.
+ */
+static void
+drain_pipe(int fd, Stream *stream)
+{
+    char buffer[1000];
+    ssize_t n;
+
+    while ((n = read(fd, buffer, sizeof(buffer))) > 0)
+        stream_add_string(stream, raw_bytes_to_binary(buffer, n));
+
+    if (n == 0)
+        network_unregister_fd(fd);
+}
+
 static void
 stdout_readable(int fd, void *data)
 {
     task_waiting_on_exec *tw = (task_waiting_on_exec *)data;
-    char buffer[1000];
-    int n;
-    while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
-        stream_add_string(tw->sout, raw_bytes_to_binary(buffer, n));
-    }
+
+    drain_pipe(fd, tw->sout);
 }
 
 static void
 stderr_readable(int fd, void *data)
 {
     task_waiting_on_exec *tw = (task_waiting_on_exec *)data;
-    char buffer[1000];
-    int n;
-    while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
-        stream_add_string(tw->serr, raw_bytes_to_binary(buffer, n));
-    }
+
+    drain_pipe(fd, tw->serr);
 }
 
 static pid_t
