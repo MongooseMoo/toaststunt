@@ -44,6 +44,8 @@ def main():
     test_root = pathlib.Path(__file__).resolve().parent
     with tempfile.TemporaryDirectory(prefix="mongoose-map-order-") as temp:
         root = pathlib.Path(temp)
+        # Match test/files in the normal test checkout for FileIO suites.
+        (root / "files").mkdir()
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
             port = reservation.getsockname()[1]

@@ -628,6 +628,28 @@ make_space_pack()
 
 /**** built in functions ****/
 
+/* Check each row before advancing: an earlier LF/CR precedes a later
+ * non-string. Never serialize, copy, or modify the input list. */
+static package
+bf_validate_string_lines(Var arglist, Byte next, void *vdata, Objid progr)
+{
+    Var lines = arglist.v.list[1];
+    enum error error = E_NONE;
+    for (int i = 1; i <= listlength(lines); i++) {
+        if (lines.v.list[i].type != TYPE_STR) {
+            error = E_TYPE;
+            break;
+        }
+        if (strchr(lines.v.list[i].v.str, '\n')
+                || strchr(lines.v.list[i].v.str, '\r')) {
+            error = E_INVARG;
+            break;
+        }
+    }
+    free_var(arglist);
+    return error == E_NONE ? make_int_pack(1) : make_error_pack(error);
+}
+
 static package
 bf_length(Var arglist, Byte next, void *vdata, Objid progr)
 {
@@ -1762,6 +1784,8 @@ register_list(void)
     register_function("encode_binary", 0, -1, bf_encode_binary);
     register_function("chr", 0, -1, bf_chr);
     /* list */
+    register_function("validate_string_lines", 1, 1,
+                      bf_validate_string_lines, TYPE_LIST);
     register_function("length", 1, 1, bf_length, TYPE_ANY);
     register_function("setadd", 2, 2, bf_setadd, TYPE_LIST, TYPE_ANY);
     register_function("setremove", 2, 2, bf_setremove, TYPE_LIST, TYPE_ANY);

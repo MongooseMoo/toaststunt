@@ -21,6 +21,7 @@
     - next_recycled_object (return the next object available for recreation)
     - reverse (reverse lists)
     - all_members (return the indices of all instances of a type in a list)
+    - validate_string_lines, file_writelines (ordered string-line validation and scalar-semantics bulk line writes; see [string_lines.md](string_lines.md))
     - curl (HTTP client: GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS with request headers, request bodies, JSON serialization/parsing, and size/timeout caps)
     - owned_objects (returns all valid objects owned by an object)
     - connection_name_lookup (perform a DNS name lookup)
