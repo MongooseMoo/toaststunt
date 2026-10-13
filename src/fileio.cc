@@ -674,12 +674,17 @@ bf_file_readlines(Var arglist, Byte next, void *vdata, Objid progr)
  * void file_writeline(FHANDLE handle, STR line)
  */
 
+/* Shared row operation. Keep scalar argument checks ahead of FileIO checks
+ * and reset errno for every row, including after an ignored flush failure. */
 static package
-bf_file_writeline(Var arglist, Byte next, void *vdata, Objid progr)
+file_write_line(Var fhandle, Var line, Objid progr)
 {
     package r;
-    Var fhandle = arglist.v.list[1];
-    const char *buffer = arglist.v.list[2].v.str;
+    if (fhandle.type != TYPE_INT)
+        return make_arg_type_error_pack("file_writeline", 1, TYPE_INT, fhandle.type);
+    if (line.type != TYPE_STR)
+        return make_arg_type_error_pack("file_writeline", 2, TYPE_STR, line.type);
+    const char *buffer = line.v.str;
     const char *rawbuffer;
     file_mode mode;
     file_type type;
@@ -706,6 +711,29 @@ bf_file_writeline(Var arglist, Byte next, void *vdata, Objid progr)
             }
             r = no_var_pack();
         }
+    }
+    return r;
+}
+
+static package
+bf_file_writeline(Var arglist, Byte next, void *vdata, Objid progr)
+{
+    package r = file_write_line(arglist.v.list[1], arglist.v.list[2], progr);
+    free_var(arglist);
+    return r;
+}
+
+/* Equivalent to a sequence of scalar writes. An empty sequence has no
+ * FileIO/type/permission side effects; later errors retain earlier writes. */
+static package
+bf_file_writelines(Var arglist, Byte next, void *vdata, Objid progr)
+{
+    Var lines = arglist.v.list[2];
+    package r = no_var_pack();
+    for (int i = 1; i <= listlength(lines); i++) {
+        r = file_write_line(arglist.v.list[1], lines.v.list[i], progr);
+        if (r.kind != package::BI_RETURN)
+            break;
     }
     free_var(arglist);
     return r;
@@ -1583,6 +1611,7 @@ register_fileio(void)
     register_function("file_readline", 1, 1, bf_file_readline, TYPE_INT);
     register_function("file_readlines", 3, 3, bf_file_readlines, TYPE_INT, TYPE_INT, TYPE_INT);
     register_function("file_writeline", 2, 2, bf_file_writeline, TYPE_INT, TYPE_STR);
+    register_function("file_writelines", 2, 2, bf_file_writelines, TYPE_ANY, TYPE_LIST);
     register_function("file_grep", 2, 3, bf_file_grep, TYPE_INT, TYPE_STR, TYPE_INT);
 
     register_function("file_read", 2, 2, bf_file_read, TYPE_INT, TYPE_INT);
