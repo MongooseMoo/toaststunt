@@ -24,6 +24,7 @@
 #include <unordered_set>
 #include <vector>
 #include <algorithm>
+#include <climits>
 
 #include <ctime>
 #include "config.h"
@@ -40,6 +41,7 @@
 #include "map.h"
 #include "options.h"
 #include "log.h"
+#include "waif.h"
 
 static Object **objects;
 static Num num_objects = 0;
@@ -300,8 +302,21 @@ db_create_object(Num new_objid, bool anonymous)
 {
     Object *o;
 
-    if (new_objid <= 0 || new_objid > num_objects)
+    if (new_objid <= 0 || new_objid >= num_objects) {
+        /* extend() uses signed-int power-of-two capacities. Check its bound
+         * before incrementing Num or converting its argument to unsigned int.
+         * A trimmed high-water mark does not make a WAIF-owned/classed slot
+         * available: preserve it as a recycled hole and keep looking. */
+        constexpr Num last_append_slot = INT_MAX / 2 - 1;
+        while (true) {
+            if (num_objects > last_append_slot)
+                return NOTHING;
+            if (!waif_uses_object_slot(num_objects))
+                break;
+            dbpriv_new_recycled_object();
+        }
         new_objid = num_objects;
+    }
 
     o = dbpriv_new_object(new_objid, anonymous);
     db_init_object(o, anonymous);
@@ -551,7 +566,7 @@ db_renumber_object(Objid old)
 #endif /* USE_ANCESTOR_CACHE */
 
     for (_new = 0; _new < old; _new++) {
-        if (objects[_new] == nullptr) {
+        if (objects[_new] == nullptr && !waif_uses_object_slot(_new)) {
             /* Change the identity of the object. */
             o = objects[_new] = objects[old];
             objects[old] = nullptr;

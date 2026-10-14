@@ -42,6 +42,16 @@ static std::unordered_map<Objid, unsigned int> waif_class_count;
 static std::unordered_map<Objid, unsigned long> waif_owner_count;
 std::unordered_map<Waif *, bool> destroyed_waifs;
 
+bool
+waif_uses_object_slot(Objid object)
+{
+    auto owner = waif_owner_count.find(object);
+    if (owner != waif_owner_count.end() && owner->second != 0)
+        return true;
+    auto klass = waif_class_count.find(object);
+    return klass != waif_class_count.end() && klass->second != 0;
+}
+
 #define PROP_MAPPED(Mmap, Mbit) ((Mmap)[(Mbit) / 32] & (1 << ((Mbit) % 32)))
 #define MAP_PROP(Mmap, Mbit) (Mmap)[(Mbit) / 32] |= 1 << ((Mbit) % 32)
 #define N_MAPPABLE_PROPS (WAIF_MAPSZ * 32)

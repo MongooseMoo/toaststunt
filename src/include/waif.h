@@ -43,6 +43,9 @@ typedef struct WaifPropdefs {
 } WaifPropdefs;
 
 extern void free_waif(Waif *);
+/* Allocated waifs pin their numeric owner/class slots until those references
+ * are released, including during finalization and resurrection. */
+extern bool waif_uses_object_slot(Objid);
 extern Waif *dup_waif(Waif *);
 extern enum error waif_get_prop(Waif *, const char *, Var *, Objid progr);
 extern enum error waif_put_prop(Waif *, const char *, Var, Objid progr);

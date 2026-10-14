@@ -57,3 +57,13 @@ Maintained WAIF owner allocation counts and deferred-finalizer controls:
 
 The reload test verifies distinct allocations and saved native continuations
 across two candidate-runtime reloads. See docs/Features/waif_owner_count.md.
+
+Recycled object slots still referenced by allocated WAIF owners or classes:
+
+    python3 test/run_map_order_regressions.py build/moo --test test_recycled_waif_slots.rb
+    python3 test/run_recycled_waif_regressions.py build/moo --prepare-with /path/to/old/moo
+
+The tests exercise real finalization/resurrection, initializer suspension,
+renumbering and high-water trimming. The reload test retains an invalid owner
+across two candidate loads before actual reference release permits reuse.
+See docs/Features/recycled_waif_slots.md for destination and error-order rules.

@@ -31,6 +31,7 @@
 #include "structures.h"
 #include "utils.h"
 #include "log.h"
+#include "waif.h"
 
 static int
 controls(Objid who, Objid what)
@@ -390,6 +391,13 @@ bf_create(Var arglist, Byte next, void *vdata, Objid progr)
             Objid oid = db_create_object(-1, anonymous);
             Var args;
 
+            if (oid == NOTHING) {
+                if (valid(owner))
+                    incr_quota(owner);
+                free_var(arglist);
+                return make_error_pack(E_QUOTA);
+            }
+
             db_set_object_owner(oid, !valid(owner) ? oid : owner);
 
             /* This tmp var is used to indicate to db_change_parents that there's no need to
@@ -491,6 +499,13 @@ bf_recreate(Var arglist, Byte next, void *vdata, Objid progr)
                     && !db_object_allows(arglist.v.list[2], progr, FLAG_FERTILE))) {
             free_var(arglist);
             return make_error_pack(E_PERM);
+        }
+
+        /* Keep legacy argument and authority errors ahead of the new slot
+         * refusal, and refuse before debiting quota or calling initialize. */
+        if (waif_uses_object_slot(arglist.v.list[1].v.obj)) {
+            free_var(arglist);
+            return make_error_pack(E_INVARG);
         }
 
         if (valid(owner) && !decr_quota(owner)) {
@@ -1298,7 +1313,7 @@ bf_next_recycled_object(Var arglist, Byte next, void *vdata, Objid progr)
     package ret = make_var_pack(Var::new_int(0));
 
     for (; i_obj <= max_obj; i_obj++) {
-        if (!valid(i_obj)) {
+        if (!valid(i_obj) && !waif_uses_object_slot(i_obj)) {
             ret = make_var_pack(Var::new_obj(i_obj));
             break;
         }
