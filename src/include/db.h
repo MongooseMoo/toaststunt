@@ -105,6 +105,7 @@ extern Var db_anon_debug(Var options, Var arguments);
 extern int valid(Objid);
 extern int is_valid(Var);
 
+/* Returns NOTHING if an appended slot would exceed object-table capacity. */
 extern Objid db_create_object(Num new_objid, bool anonymous = false);
 				/* Creates a new object with parent & location
 				 * == #-1.  Returns new object's id number.

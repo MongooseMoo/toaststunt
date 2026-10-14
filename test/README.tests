@@ -57,3 +57,24 @@ Maintained WAIF owner allocation counts and deferred-finalizer controls:
 
 The reload test verifies distinct allocations and saved native continuations
 across two candidate-runtime reloads. See docs/Features/waif_owner_count.md.
+
+Recycled object slots still referenced by allocated WAIF owners or classes:
+
+    python3 test/run_map_order_regressions.py build/moo --test test_recycled_waif_slots.rb
+    python3 test/run_recycled_waif_regressions.py build/moo --prepare-with /path/to/old/moo
+
+The tests exercise real finalization/resurrection, initializer suspension,
+renumbering and high-water trimming. The reload test retains an invalid owner
+across two candidate loads before actual reference release permits reuse.
+See docs/Features/recycled_waif_slots.md for destination and error-order rules.
+
+Temporary anonymous checkpoint IDs must not revive destroyed WAIF classes:
+
+    python3 -B test/run_waif_checkpoint_alias.py build/moo
+    python3 -B test/run_waif_checkpoint_alias.py build/moo --prepare-with /path/to/old/moo --recover-old
+
+The default checks candidate writing/loading in both anonymous-first and
+no-anonymous cases. The recovery mode proves old-writer counts before any
+getter, then candidate resaving and a second load while preserving the outer
+owner. An old writer without --recover-old intentionally reproduces the bug.
+Use the existing WSL bash -lc login environment for its rbenv Ruby installation.
