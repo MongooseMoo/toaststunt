@@ -74,6 +74,9 @@ typedef struct Object {
     void *waif_propdefs;
     int flags; /* see db.h for `flags' values */
     unsigned int nval; // number of propdefs
+    /* Native allocation kind, independent of permissions and temporary dump
+     * object IDs. Initialized by every allocator; not part of the DB format. */
+    bool anonymous_storage;
 } Object;
 
 /*

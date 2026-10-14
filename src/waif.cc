@@ -42,6 +42,16 @@ static std::unordered_map<Objid, unsigned int> waif_class_count;
 static std::unordered_map<Objid, unsigned long> waif_owner_count;
 std::unordered_map<Waif *, bool> destroyed_waifs;
 
+bool
+waif_uses_object_slot(Objid object)
+{
+    auto owner = waif_owner_count.find(object);
+    if (owner != waif_owner_count.end() && owner->second != 0)
+        return true;
+    auto klass = waif_class_count.find(object);
+    return klass != waif_class_count.end() && klass->second != 0;
+}
+
 #define PROP_MAPPED(Mmap, Mbit) ((Mmap)[(Mbit) / 32] & (1 << ((Mbit) % 32)))
 #define MAP_PROP(Mmap, Mbit) (Mmap)[(Mbit) / 32] |= 1 << ((Mbit) % 32)
 #define N_MAPPABLE_PROPS (WAIF_MAPSZ * 32)
@@ -902,7 +912,13 @@ write_waif(Var v)
      * the saved waif will be trashed.  Has to be before the next
      * bit because that's where we trash it!
      */
-    update_waif_propdefs(w);
+    Object *classp = dbpriv_find_object(w->_class);
+    /* Dump IDs assigned to anonymous objects must not revive an invalid
+     * numbered class, including after a failed or unforked save attempt. */
+    if (!classp || classp->anonymous_storage)
+        invalidate_waif(w);
+    else
+        update_waif_propdefs(w);
 
     /* Save the propval map info (for forked checkpoints we'll have to
      * clobber it before saving to stash the index).  Then allocate a
