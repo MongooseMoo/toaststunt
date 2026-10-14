@@ -109,6 +109,12 @@ static Checkpoint_Reason checkpoint_requested = CHKPT_OFF;
 
 static int checkpoint_finished = 0; /* 1 = failure, 2 = success */
 
+/* The process id of the forked checkpointer while one is running, else 0.
+ * Written by fork_server() with SIGCHLD blocked and read by the SIGCHLD
+ * handler, both on the main thread.
+ */
+static volatile sig_atomic_t checkpoint_pid = 0;
+
 static bool reopen_logfile_requested = false;
 
 static void handle_user_defined_signal(int sig);
@@ -334,17 +340,29 @@ fork_server(const char *subtask_name)
 {
     pid_t pid;
     std::stringstream s;
+    sigset_t sigchld, previous;
 
     s << "Forking " << subtask_name;
 
+    /* Keep the SIGCHLD handler out until the child's process id has been
+     * recorded, so that a child that exits at once is still recognised.
+     */
+    sigemptyset(&sigchld);
+    sigaddset(&sigchld, SIGCHLD);
+    pthread_sigmask(SIG_BLOCK, &sigchld, &previous);
+
     pid = fork();
     if (pid < 0) {
+        pthread_sigmask(SIG_SETMASK, &previous, nullptr);
         log_perror(s.str().c_str());
         return FORK_ERROR;
     } else if (pid == 0) {
+        pthread_sigmask(SIG_SETMASK, &previous, nullptr);
         in_child = true;
         return FORK_CHILD;
     } else {
+        checkpoint_pid = pid;
+        pthread_sigmask(SIG_SETMASK, &previous, nullptr);
         return FORK_PARENT;
     }
 }
@@ -411,47 +429,55 @@ call_checkpoint_notifier(int successful)
     run_server_task(-1, Var::new_obj(SYSTEM_OBJECT), "checkpoint_finished", args, "", nullptr);
 }
 
+/* Account for one reaped child.  It is either a process started by exec(),
+ * which the exec subsystem claims, or the checkpointer, which is known by
+ * its process id.
+ *
+ * A child that is neither is left alone.  It used to be taken for the
+ * checkpointer, so that when an exec() child was reaped before exec.cc had
+ * recorded its process id, the server announced a checkpoint that had not
+ * happened and never resumed the task waiting on the child.
+ */
+static void
+child_exited(pid_t p, int status)
+{
+    if (exec_complete(p, WEXITSTATUS(status)))
+        return;
+
+    if (checkpoint_pid != 0 && p == checkpoint_pid) {
+        checkpoint_pid = 0;
+        checkpoint_finished = (status == 0) + 1;    /* 1 = failure, 2 = success */
+    }
+}
+
 static void
 child_completed_signal(int sig)
 {
     int tmp_errno = errno;
     pid_t p;
-    pid_t checkpoint_child = 0;
     int status;
 
-    /* Signal every child's completion to the exec subsystem and let
-     * it decide if it's relevant.
-     */
 #if HAVE_WAITPID
 
-    while ((p = waitpid(-1, &status, WNOHANG)) > 0) {
-        if (!exec_complete(p, WEXITSTATUS(status)))
-            checkpoint_child = p;
-    }
+    while ((p = waitpid(-1, &status, WNOHANG)) > 0)
+        child_exited(p, status);
 #else
 #if HAVE_WAIT3
-    while ((p = wait3(&status, WNOHANG, 0)) > 0) {
-        if (!exec_complete(p, WEXITSTATUS(status)))
-            checkpoint_child = p;
-    }
+    while ((p = wait3(&status, WNOHANG, 0)) > 0)
+        child_exited(p, status);
 #else
 #if HAVE_WAIT2
-    while ((p = wait2(&status, WNOHANG)) > 0) {
-        if (!exec_complete(p, WEXITSTATUS(status)))
-            checkpoint_child = p;
-    }
+    while ((p = wait2(&status, WNOHANG)) > 0)
+        child_exited(p, status);
 #else
     p = wait(&status);
-    if (!exec_complete(p, WEXITSTATUS(status)))
-        checkpoint_child = p;
+    if (p > 0)
+        child_exited(p, status);
 #endif
 #endif
 #endif
 
     signal(sig, child_completed_signal);
-
-    if (checkpoint_child)
-        checkpoint_finished = (status == 0) + 1;    /* 1 = failure, 2 = success */
 
     errno = tmp_errno;
 }

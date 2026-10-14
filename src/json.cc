@@ -115,6 +115,7 @@ struct parse_context {
     mode_type mode;
     int depth;
     int max_depth;
+    const char *cancel_reason;
 };
 
 struct generate_context {
@@ -268,6 +269,7 @@ handle_number(void *ctx, const char *numberVal, unsigned int numberLen, yajl_tok
         return 1;
     }
 
+    pctx->cancel_reason = "Number out of representable range";
     return 0;
 }
 
@@ -341,8 +343,10 @@ handle_start_map(void *ctx)
 {
     struct parse_context *pctx = (struct parse_context *)ctx;
 
-    if (pctx->depth >= pctx->max_depth)
+    if (pctx->depth >= pctx->max_depth) {
+        pctx->cancel_reason = "JSON nesting depth exceeded";
         return 0;
+    }
 
     Var k, v;
     k.type = (var_type)MAP_SENTINEL;
@@ -374,8 +378,10 @@ handle_start_array(void *ctx)
 {
     struct parse_context *pctx = (struct parse_context *)ctx;
 
-    if (pctx->depth >= pctx->max_depth)
+    if (pctx->depth >= pctx->max_depth) {
+        pctx->cancel_reason = "JSON nesting depth exceeded";
         return 0;
+    }
 
     Var v;
     v.type = (var_type)ARRAY_SENTINEL;
@@ -554,10 +560,14 @@ static yajl_callbacks callbacks = {
  * This function is safe to call from a background thread: it touches
  * no database state, which is why the maximum nesting depth is passed
  * in rather than read from $server_options here.
+ *
+ * If `error_out' is given, a failure stores a str_dup()'d description of
+ * what went wrong in it (release with free_str()).  That allocates, so
+ * only pass it from the main server thread.
  */
 int
 json_parse_string(const char *str, size_t len, int embedded_types, int max_depth,
-                  int strict, Var *out)
+                  int strict, Var *out, char **error_out)
 {
     yajl_handle hand;
     yajl_parser_config cfg = { strict ? 0U : 1U, 1 };
@@ -571,6 +581,7 @@ json_parse_string(const char *str, size_t len, int embedded_types, int max_depth
     pctx.mode = embedded_types ? MODE_EMBEDDED_TYPES : MODE_COMMON_SUBSET;
     pctx.depth = 0;
     pctx.max_depth = max_depth;
+    pctx.cancel_reason = nullptr;
 
     hand = yajl_alloc(&callbacks, &cfg, nullptr, (void *)&pctx);
 
@@ -584,12 +595,15 @@ json_parse_string(const char *str, size_t len, int embedded_types, int max_depth
     }
     stat = yajl_parse_complete(hand);
 
+    bool trailing_content = false;
     if (strict) {
         while (consumed < len && (str[consumed] == ' ' || str[consumed] == '\t'
                                   || str[consumed] == '\r' || str[consumed] == '\n'))
             consumed++;
-        if (consumed != len)
+        if (consumed != len) {
+            trailing_content = (stat == yajl_status_ok);
             stat = yajl_status_error;
+        }
     }
 
     int ok;
@@ -598,6 +612,28 @@ json_parse_string(const char *str, size_t len, int embedded_types, int max_depth
         while (pctx.top != &pctx.stack) {
             Var v = POP(pctx.top);
             free_var(v);
+        }
+        if (error_out) {
+            if (pctx.cancel_reason != nullptr) {
+                /* We rejected the input ourselves (depth limit, number out of range). */
+                *error_out = str_dup(pctx.cancel_reason);
+            } else if (trailing_content) {
+                *error_out = str_dup("Trailing content after JSON value");
+            } else if (stat == yajl_status_ok) {
+                *error_out = str_dup("No JSON value");
+            } else {
+                /* A syntax error: yajl's message, with the offending text. */
+                unsigned char *yajl_err = yajl_get_error(hand, 1, (const unsigned char *)str, len);
+                /* The message ends up as the value of a raised error, which can
+                 * be saved with a suspended task, and dbio_write_string() uses
+                 * newlines as record separators. */
+                for (unsigned char *p = yajl_err; *p; p++) {
+                    if (*p == '\n')
+                        *p = ' ';
+                }
+                *error_out = str_dup((const char *)yajl_err);
+                yajl_free_error(hand, yajl_err);
+            }
         }
         ok = 0;
     } else {
@@ -667,10 +703,16 @@ bf_parse_json(Var arglist, Byte next, void *vdata, Objid progr)
     package pack;
     Var v;
 
-    if (json_parse_string(str, strlen(str), embedded_types, max_depth, 0, &v))
+    char *error = nullptr;
+
+    if (json_parse_string(str, strlen(str), embedded_types, max_depth, 0, &v, &error)) {
         pack = make_var_pack(v);
-    else
-        pack = make_error_pack(E_INVARG);
+    } else {
+        /* Raise with a description of what was wrong with the input. */
+        pack = make_raise_pack(E_INVARG, error ? error : "Invalid JSON", var_ref(zero));
+        if (error)
+            free_str(error);
+    }
 
     free_var(arglist);
     return pack;

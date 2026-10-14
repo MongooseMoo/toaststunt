@@ -192,20 +192,9 @@ become_float(Var in, double *ret)
 /**** opcode implementations ****/
 
 /*
- * All of the following implementations are strict, not performing any
- * coercions between integer and floating-point operands.
+ * The following implementations automatically promote 
+ * integers to floats when necessary.
  */
-
-int
-do_equals(Var lhs, Var rhs)
-{   /* LHS == RHS */
-    /* At least one of LHS and RHS is TYPE_FLOAT */
-
-    if (lhs.type != rhs.type)
-        return 0;
-    else
-        return lhs.v.fnum == rhs.v.fnum;
-}
 
 int
 compare_integers(Num a, Num b)
@@ -217,6 +206,359 @@ compare_integers(Num a, Num b)
     else
         return 0;
 }
+
+#ifdef PROMOTE_NUMBERS
+
+Var compare_numbers(Var a, Var b)
+{
+    Var ans;
+
+    int compare_result = 0; 
+
+    if (a.type == TYPE_INT && b.type == TYPE_INT)
+    {
+        compare_result = (a.v.num < b.v.num) ? -1 : ((a.v.num > b.v.num) ? 1 : 0);
+    }
+    else if (a.type == TYPE_FLOAT && b.type == TYPE_FLOAT)
+    {
+        compare_result = (a.v.fnum < b.v.fnum) ? -1 : ((a.v.fnum > b.v.fnum) ? 1 : 0);
+    }
+    else if (a.type == TYPE_INT && b.type == TYPE_FLOAT)
+    {
+        compare_result = (static_cast<double>(a.v.num) < b.v.fnum) ? -1 : ((static_cast<double>(a.v.num) > b.v.fnum) ? 1 : 0);
+    }
+    else if (a.type == TYPE_FLOAT && b.type == TYPE_INT)
+    {
+        compare_result = (a.v.fnum < static_cast<double>(b.v.num)) ? -1 : ((a.v.fnum > static_cast<double>(b.v.num)) ? 1 : 0);
+    }
+    else
+    {
+        // Types don't match or one of them is not numeric, return an error
+        ans.type = TYPE_ERR;
+        ans.v.err = E_TYPE;
+        return ans;
+    }
+
+    ans.type = TYPE_INT;
+    ans.v.num = compare_result;
+
+    return ans;
+}
+
+int do_equals(Var lhs, Var rhs)
+{
+    /* LHS == RHS */
+    /* Handle comparisons between integers and floats */
+
+    if (lhs.type != rhs.type)
+    {
+        /* If types don't match, compare as floats if one is float */
+        if ((lhs.type == TYPE_FLOAT || rhs.type == TYPE_FLOAT) &&
+            (lhs.type == TYPE_INT || rhs.type == TYPE_INT))
+            return (double)lhs.v.fnum == (double)rhs.v.fnum;
+        else
+            return 0;
+    }
+    else
+    {
+        /* Types match, compare based on type */
+        if (lhs.type == TYPE_INT)
+            return lhs.v.num == rhs.v.num;
+        else if (lhs.type == TYPE_FLOAT)
+            return (double)lhs.v.fnum == (double)rhs.v.fnum;
+        else
+            return 0;
+    }
+}
+
+#define SIMPLE_BINARY(name, op)                                            \
+    Var                                                                    \
+        do_##name(Var a, Var b)                                            \
+    {                                                                      \
+        Var ans, temp_a, temp_b;                                           \
+                                                                           \
+        if (a.type != b.type)                                              \
+        {                                                                  \
+            temp_a = var_dup(a);                                           \
+            temp_b = var_dup(b);                                           \
+                                                                           \
+            if (temp_a.type == TYPE_INT && temp_b.type == TYPE_FLOAT)      \
+            {                                                              \
+                temp_a.v.fnum = (double)temp_a.v.num;                      \
+                temp_a.type = TYPE_FLOAT;                                  \
+            }                                                              \
+            else if (temp_a.type == TYPE_FLOAT && temp_b.type == TYPE_INT) \
+            {                                                              \
+                temp_b.v.fnum = (double)temp_b.v.num;                      \
+                temp_b.type = TYPE_FLOAT;                                  \
+            }                                                              \
+            else                                                           \
+            {                                                              \
+                ans.type = TYPE_ERR;                                       \
+                ans.v.err = E_TYPE;                                        \
+                return ans;                                                \
+            }                                                              \
+            if (temp_a.type == TYPE_INT && temp_b.type == TYPE_INT)        \
+            {                                                              \
+                ans.type = TYPE_INT;                                       \
+                ans.v.num = temp_a.v.num op temp_b.v.num;                  \
+            }                                                              \
+            else                                                           \
+            {                                                              \
+                double da = temp_a.v.fnum;                                 \
+                double db = temp_b.v.fnum;                                 \
+                double d = da op db;                                       \
+                if (!IS_REAL(d))                                           \
+                {                                                          \
+                    ans.type = TYPE_ERR;                                   \
+                    ans.v.err = E_FLOAT;                                   \
+                }                                                          \
+                else                                                       \
+                {                                                          \
+                    ans.type = TYPE_FLOAT;                                 \
+                    ans.v.fnum = d;                                        \
+                }                                                          \
+            }                                                              \
+        }                                                                  \
+        else                                                               \
+        {                                                                  \
+            if (a.type == TYPE_INT && b.type == TYPE_INT)                  \
+            {                                                              \
+                ans.type = TYPE_INT;                                       \
+                ans.v.num = a.v.num op b.v.num;                            \
+            }                                                              \
+            else                                                           \
+            {                                                              \
+                double da = a.v.fnum;                                      \
+                double db = b.v.fnum;                                      \
+                double d = da op db;                                       \
+                                                                           \
+                if (!IS_REAL(d))                                           \
+                {                                                          \
+                    ans.type = TYPE_ERR;                                   \
+                    ans.v.err = E_FLOAT;                                   \
+                }                                                          \
+                else                                                       \
+                {                                                          \
+                    ans.type = TYPE_FLOAT;                                 \
+                    ans.v.fnum = d;                                        \
+                }                                                          \
+            }                                                              \
+        }                                                                  \
+        return ans;                                                        \
+    }
+
+SIMPLE_BINARY(add, +)
+SIMPLE_BINARY(subtract, -)
+SIMPLE_BINARY(multiply, *)
+
+Var do_modulus(Var a, Var b)
+{
+    Var ans;
+
+    if (a.type != b.type)
+    {
+        Var temp_a = var_dup(a);
+        Var temp_b = var_dup(b);
+
+        if ((temp_a.type == TYPE_INT || temp_a.type == TYPE_FLOAT) &&
+            (temp_b.type == TYPE_INT || temp_b.type == TYPE_FLOAT))
+        {
+            if (temp_a.type == TYPE_INT)
+            {
+                temp_a.type = TYPE_FLOAT;
+                temp_a.v.fnum = static_cast<double>(temp_a.v.num);
+            }
+
+            if (temp_b.type == TYPE_INT)
+            {
+                temp_b.type = TYPE_FLOAT;
+                temp_b.v.fnum = static_cast<double>(temp_b.v.num);
+            }
+
+            if ((temp_a.type == TYPE_FLOAT && temp_b.v.fnum == 0.0) || (temp_b.type == TYPE_FLOAT && temp_b.v.fnum == 0.0))
+            {
+                ans.type = TYPE_ERR;
+                ans.v.err = E_DIV;
+            }
+            else
+            {
+                const auto n = temp_a.v.fnum;
+                const auto d = temp_b.v.fnum;
+                const auto result = fmod((fmod(n, d) + d), d);
+                ans.type = TYPE_FLOAT;
+                ans.v.fnum = result;
+            }
+
+        }
+        else
+        {
+            ans.type = TYPE_ERR;
+            ans.v.err = E_TYPE;
+        }
+    }
+    else
+    {
+        if ((a.type == TYPE_INT && b.v.num == 0) || (a.type == TYPE_FLOAT && b.v.fnum == 0.0))
+        {
+            ans.type = TYPE_ERR;
+            ans.v.err = E_DIV;
+        }
+        else
+        {
+            if (a.type == TYPE_INT)
+            {
+                const auto n = a.v.num;
+                const auto d = b.v.num;
+                const auto result = (n % d + d) % d;
+                ans.type = TYPE_INT;
+                ans.v.num = result;
+            }
+            else
+            {
+                const auto n = a.v.fnum;
+                const auto d = b.v.fnum;
+                const auto result = fmod((fmod(n, d) + d), d);
+                ans.type = TYPE_FLOAT;
+                ans.v.fnum = result;
+            }
+        }
+    }
+
+    return ans;
+}
+
+Var do_divide(Var a, Var b)
+{
+    Var ans, temp_a, temp_b;
+
+    temp_a = var_dup(a);
+    temp_b = var_dup(b);
+
+    // Check if either operand is a float, and if so, promote both to float
+    if ((temp_a.type == TYPE_FLOAT || temp_b.type == TYPE_FLOAT) &&
+        (temp_a.type == TYPE_INT || temp_b.type == TYPE_INT))
+    {
+        if (temp_a.type == TYPE_INT)
+        {
+            temp_a.type = TYPE_FLOAT;
+            temp_a.v.fnum = (double)temp_a.v.num;
+        }
+
+        if (temp_b.type == TYPE_INT)
+        {
+            temp_b.type = TYPE_FLOAT;
+            temp_b.v.fnum = (double)temp_b.v.num;
+        }
+    }
+
+    if (temp_a.type != temp_b.type)
+    {
+        ans.type = TYPE_ERR;
+        ans.v.err = E_TYPE;
+        return ans;
+    }
+
+    if ((temp_a.type == TYPE_INT && temp_b.v.num == 0) ||
+        (temp_a.type == TYPE_FLOAT && temp_b.v.fnum == 0.0))
+    {
+        ans.type = TYPE_ERR;
+        ans.v.err = E_DIV;
+    }
+    else if (temp_a.type == TYPE_INT)
+    {
+        ans.type = TYPE_INT;
+        if (temp_a.v.num == MININT && temp_b.v.num == -1)
+            ans.v.num = MININT;
+        else
+            ans.v.num = temp_a.v.num / temp_b.v.num;
+    }
+    else
+    { // must be float
+        double d = temp_a.v.fnum / temp_b.v.fnum;
+        if (!IS_REAL(d))
+        {
+            ans.type = TYPE_ERR;
+            ans.v.err = E_FLOAT;
+        }
+        else
+        {
+            ans.type = TYPE_FLOAT;
+            ans.v.fnum = d;
+        }
+    }
+        return ans;
+}
+
+Var do_power(Var lhs, Var rhs)
+{
+    Var ans;
+
+    if (lhs.type == TYPE_INT && rhs.type == TYPE_INT)
+    {
+        Num base = lhs.v.num;
+        Num exponent = rhs.v.num;
+
+        if (exponent < 0)
+        {
+            ans.type = TYPE_FLOAT;
+            ans.v.fnum = pow((double)base, (double)exponent);
+        }
+        else
+        {
+            Num result = 1;
+            while (exponent > 0)
+            {
+                result *= base;
+                exponent--;
+            }
+            ans.type = TYPE_INT;
+            ans.v.num = result;
+        }
+    }
+    else if (lhs.type == TYPE_INT || lhs.type == TYPE_FLOAT)
+    {
+        double base, exponent;
+
+        if (lhs.type == TYPE_INT)
+            base = (double)lhs.v.num;
+        else
+            base = lhs.v.fnum;
+
+        if (rhs.type == TYPE_INT)
+            exponent = (double)rhs.v.num;
+        else if (rhs.type == TYPE_FLOAT)
+            exponent = rhs.v.fnum;
+        else
+            goto type_error;
+
+        errno = 0;
+        double result = pow(base, exponent);
+
+        if (errno != 0 || !IS_REAL(result))
+        {
+            ans.type = TYPE_ERR;
+            ans.v.err = E_FLOAT;
+        }
+        else
+        {
+            ans.type = TYPE_FLOAT;
+            ans.v.fnum = result;
+        }
+    }
+    else
+        goto type_error;
+
+    return ans;
+
+type_error:
+    ans.type = TYPE_ERR;
+    ans.v.err = E_TYPE;
+    return ans;
+}
+
+#else // PROMOTE_NUMBERS
+
 
 Var
 compare_numbers(Var a, Var b)
@@ -247,6 +589,17 @@ compare_numbers(Var a, Var b)
     return ans;
 }
 
+
+int
+do_equals(Var lhs, Var rhs)
+{   /* LHS == RHS */
+    /* At least one of LHS and RHS is TYPE_FLOAT */
+
+    if (lhs.type != rhs.type)
+        return 0;
+    else
+        return lhs.v.fnum == rhs.v.fnum;
+}
 
 #define SIMPLE_BINARY(name, op)                 \
     Var                                         \
@@ -414,6 +767,8 @@ type_error:
     ans.v.err = E_TYPE;
     return ans;
 }
+
+#endif
 
 /**** built in functions ****/
 
@@ -525,20 +880,55 @@ bf_abs(Var arglist, Byte next, void *vdata, Objid progr)
     return make_var_pack(r);
 }
 
+#ifdef PROMOTE_NUMBERS
+
 #define MATH_FUNC(name)                                                             \
     static package                                                                  \
-    bf_ ## name(Var arglist, Byte next, void *vdata, Objid progr)                   \
+    bf_##name(Var arglist, Byte next, void *vdata, Objid progr)                     \
     {                                                                               \
         errno = 0;                                                                  \
-        const auto result = name(arglist.v.list[1].v.fnum);                         \
+        Var var = arglist.v.list[1];                                                \
+        double input;                                                               \
+        if (var.type == TYPE_INT) {                                                 \
+            input = (double)var.v.num;                                              \
+        } else if (var.type == TYPE_FLOAT) {                                        \
+            input = var.v.fnum;                                                     \
+        } else {                                                                    \
+            free_var(arglist);                                                      \
+            return make_error_pack(E_TYPE);                                         \
+        }                                                                           \
+        double result = name(input);                                                \
         free_var(arglist);                                                          \
         if (errno == EDOM)                                                          \
             return make_error_pack(E_INVARG);                                       \
-        else if (errno != 0  ||  !IS_REAL(result))                                  \
+        else if (errno != 0 || !IS_REAL(result))                                    \
             return make_error_pack(E_FLOAT);                                        \
         else                                                                        \
             return make_float_pack(result);                                         \
     }
+
+#else // PROMOTE_NUMBERS
+
+#define MATH_FUNC(name)                                                             \
+    static package                                                                  \
+    bf_##name(Var arglist, Byte next, void *vdata, Objid progr)                     \
+    {                                                                               \
+        errno = 0;                                                                  \
+        if (arglist.v.list[1].type != TYPE_FLOAT) {                                 \
+            free_var(arglist);                                                      \
+            return make_error_pack(E_TYPE);                                         \
+        }                                                                           \
+        double result = name(arglist.v.list[1].v.fnum);                             \
+        free_var(arglist);                                                          \
+        if (errno == EDOM)                                                          \
+            return make_error_pack(E_INVARG);                                       \
+        else if (errno != 0 || !IS_REAL(result))                                    \
+            return make_error_pack(E_FLOAT);                                        \
+        else                                                                        \
+            return make_float_pack(result);                                         \
+    }
+
+#endif
 
 MATH_FUNC(sqrt)
 MATH_FUNC(cbrt)
@@ -564,7 +954,12 @@ bf_trunc(Var arglist, Byte next, void *vdata, Objid progr)
 {
     double d;
 
-    d = arglist.v.list[1].v.fnum;
+    #ifdef PROMOTE_NUMBERS
+    if (arglist.v.list[1].type == TYPE_INT)
+        d = (double)arglist.v.list[1].v.num;
+    else
+    #endif
+        d = arglist.v.list[1].v.fnum;
     errno = 0;
     if (d < 0.0)
         d = ceil(d);
@@ -584,13 +979,47 @@ bf_atan(Var arglist, Byte next, void *vdata, Objid progr)
 {
     double d, dd;
 
+    #ifdef PROMOTE_NUMBERS
+    if (arglist.v.list[1].type == TYPE_INT) {
+        d = (double)arglist.v.list[1].v.num;
+    } else if (arglist.v.list[1].type == TYPE_FLOAT) {
+        d = arglist.v.list[1].v.fnum;
+    } else {
+        free_var(arglist);
+        return make_error_pack(E_TYPE);
+    }
+    #else
+    if (arglist.v.list[1].type != TYPE_FLOAT) {
+        free_var(arglist);
+        return make_error_pack(E_TYPE);
+    }
     d = arglist.v.list[1].v.fnum;
+    #endif
+
     errno = 0;
     if (arglist.v.list[0].v.num >= 2) {
+        #ifdef PROMOTE_NUMBERS
+        if (arglist.v.list[2].type == TYPE_INT) {
+            dd = (double)arglist.v.list[2].v.num;
+        } else if (arglist.v.list[2].type == TYPE_FLOAT) {
+            dd = arglist.v.list[2].v.fnum;
+        } else {
+            free_var(arglist);
+            return make_error_pack(E_TYPE);
+        }
+        #else
+        if (arglist.v.list[2].type != TYPE_FLOAT) {
+            free_var(arglist);
+            return make_error_pack(E_TYPE);
+        }
         dd = arglist.v.list[2].v.fnum;
+        #endif
+
         d = atan2(d, dd);
-    } else
+    } else {
         d = atan(d);
+    }
+
     free_var(arglist);
     if (errno == EDOM)
         return make_error_pack(E_INVARG);
@@ -603,8 +1032,35 @@ bf_atan(Var arglist, Byte next, void *vdata, Objid progr)
 static package
 bf_atan2(Var arglist, Byte next, void *vdata, Objid progr)
 {
-    const auto y = arglist.v.list[1].v.fnum;
-    const auto x = arglist.v.list[2].v.fnum;
+    double y, x;
+
+    #ifdef PROMOTE_NUMBERS
+    if (arglist.v.list[1].type == TYPE_INT) {
+        y = (double)arglist.v.list[1].v.num;
+    } else if (arglist.v.list[1].type == TYPE_FLOAT) {
+        y = arglist.v.list[1].v.fnum;
+    } else {
+        free_var(arglist);
+        return make_error_pack(E_TYPE);
+    }
+
+    if (arglist.v.list[2].type == TYPE_INT) {
+        x = (double)arglist.v.list[2].v.num;
+    } else if (arglist.v.list[2].type == TYPE_FLOAT) {
+        x = arglist.v.list[2].v.fnum;
+    } else {
+        free_var(arglist);
+        return make_error_pack(E_TYPE);
+    }
+    #else
+    if (arglist.v.list[1].type != TYPE_FLOAT || arglist.v.list[2].type != TYPE_FLOAT) {
+        free_var(arglist);
+        return make_error_pack(E_TYPE);
+    }
+    y = arglist.v.list[1].v.fnum;
+    x = arglist.v.list[2].v.fnum;
+    #endif
+
     free_var(arglist);
 
     const double result = atan2(y, x);
@@ -774,7 +1230,14 @@ bf_frandom(Var arglist, Byte next, void *vdata, Objid progr)
 static package
 bf_round(Var arglist, Byte next, void *vdata, Objid progr)
 {
-    double r = round((double)arglist.v.list[1].v.fnum);
+    double r;
+
+    #ifdef PROMOTE_NUMBERS
+    if (arglist.v.list[1].type == TYPE_INT)
+        r = (double)arglist.v.list[1].v.num;
+    else
+    #endif
+        r = round((double)arglist.v.list[1].v.fnum);
 
     free_var(arglist);
 
@@ -938,13 +1401,42 @@ register_numbers(void)
     register_function("random", 0, 2, bf_random, TYPE_INT, TYPE_INT);
     register_function("reseed_random", 0, 0, bf_reseed_random);
     register_function("frandom", 1, 2, bf_frandom, TYPE_FLOAT, TYPE_FLOAT);
+#ifdef PROMOTE_NUMBERS
+    register_function("round", 1, 1, bf_round, TYPE_NUMERIC);
+#else
     register_function("round", 1, 1, bf_round, TYPE_FLOAT);
+#endif
     register_function("random_bytes", 1, 1, bf_random_bytes, TYPE_INT);
     register_function("time", 0, 0, bf_time);
     register_function("ctime", 0, 1, bf_ctime, TYPE_INT);
     register_function("ftime", 0, 1, bf_ftime, TYPE_INT);
     register_function("floatstr", 2, 3, bf_floatstr,
                       TYPE_FLOAT, TYPE_INT, TYPE_ANY);
+
+    #ifdef PROMOTE_NUMBERS
+
+    register_function("sqrt", 1, 1, bf_sqrt, TYPE_NUMERIC);
+    register_function("cbrt", 1, 1, bf_cbrt, TYPE_NUMERIC);
+    register_function("sin", 1, 1, bf_sin, TYPE_NUMERIC);
+    register_function("cos", 1, 1, bf_cos, TYPE_NUMERIC);
+    register_function("tan", 1, 1, bf_tan, TYPE_NUMERIC);
+    register_function("asin", 1, 1, bf_asin, TYPE_NUMERIC);
+    register_function("acos", 1, 1, bf_acos, TYPE_NUMERIC);
+    register_function("atan", 1, 2, bf_atan, TYPE_NUMERIC, TYPE_NUMERIC);
+    register_function("sinh", 1, 1, bf_sinh, TYPE_NUMERIC);
+    register_function("cosh", 1, 1, bf_cosh, TYPE_NUMERIC);
+    register_function("tanh", 1, 1, bf_tanh, TYPE_NUMERIC);
+    register_function("acosh", 1, 1, bf_acosh, TYPE_NUMERIC);
+    register_function("atanh", 1, 1, bf_atanh, TYPE_NUMERIC);
+    register_function("asinh", 1, 1, bf_asinh, TYPE_NUMERIC);
+    register_function("atan2", 2, 2, bf_atan2, TYPE_NUMERIC, TYPE_NUMERIC);
+    register_function("exp", 1, 1, bf_exp, TYPE_NUMERIC);
+    register_function("log", 1, 1, bf_log, TYPE_NUMERIC);
+    register_function("log10", 1, 1, bf_log10, TYPE_NUMERIC);
+    register_function("ceil", 1, 1, bf_ceil, TYPE_NUMERIC);
+    register_function("floor", 1, 1, bf_floor, TYPE_NUMERIC);
+
+    #else // PROMOTE_NUMBERS
 
     register_function("sqrt", 1, 1, bf_sqrt, TYPE_FLOAT);
     register_function("cbrt", 1, 1, bf_cbrt, TYPE_FLOAT);
@@ -966,7 +1458,13 @@ register_numbers(void)
     register_function("log10", 1, 1, bf_log10, TYPE_FLOAT);
     register_function("ceil", 1, 1, bf_ceil, TYPE_FLOAT);
     register_function("floor", 1, 1, bf_floor, TYPE_FLOAT);
+
+    #endif
+#ifdef PROMOTE_NUMBERS
+    register_function("trunc", 1, 1, bf_trunc, TYPE_NUMERIC);
+#else
     register_function("trunc", 1, 1, bf_trunc, TYPE_FLOAT);
+#endif
 
     /* Possibly misplaced functions... */
     register_function("distance", 2, 2, bf_distance, TYPE_LIST, TYPE_LIST);

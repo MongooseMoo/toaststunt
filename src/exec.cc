@@ -32,6 +32,7 @@
 
 #include <fcntl.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -85,8 +86,16 @@ static sigset_t block_sigchld;
 
 static Stream *logmsg = new_stream(30);
 
-#define BLOCK_SIGCHLD sigprocmask(SIG_BLOCK, &block_sigchld, NULL)
-#define UNBLOCK_SIGCHLD sigprocmask(SIG_UNBLOCK, &block_sigchld, NULL)
+/* These keep the SIGCHLD handler out while the main thread reads or
+ * changes `process_table'.  The server has other threads, so the mask
+ * is set with pthread_sigmask(); sigprocmask() is unspecified in a
+ * multithreaded process.  The other threads are started with SIGCHLD
+ * blocked (see init_pool_without_sigchld() in background.cc), so the
+ * main thread is the only one that ever runs the handler, and blocking
+ * the signal here really does exclude it.
+ */
+#define BLOCK_SIGCHLD pthread_sigmask(SIG_BLOCK, &block_sigchld, NULL)
+#define UNBLOCK_SIGCHLD pthread_sigmask(SIG_UNBLOCK, &block_sigchld, NULL)
 
 static task_waiting_on_exec *
 malloc_task_waiting_on_exec()
@@ -97,6 +106,16 @@ malloc_task_waiting_on_exec()
     tw->args = nullptr;
     tw->in = nullptr;
     tw->env = nullptr;
+    tw->len = 0;
+    /* No child yet: a pid of 0 matches no reaped child in
+     * exec_complete(), and -1 marks a descriptor that was never opened
+     * so that free_task_waiting_on_exec() leaves it alone.
+     */
+    tw->pid = 0;
+    tw->fin = -1;
+    tw->fout = -1;
+    tw->ferr = -1;
+    tw->the_vm = nullptr;
     tw->status = TWS_CONTINUE;
     tw->code = 0;
     tw->sout = new_stream(1000);
@@ -123,10 +142,17 @@ free_task_waiting_on_exec(task_waiting_on_exec * tw)
     }
     if (tw->in)
         free_str(tw->in);
-    close(tw->fout);
-    close(tw->ferr);
-    network_unregister_fd(tw->fout);
-    network_unregister_fd(tw->ferr);
+    /* Stop the network loop watching each pipe before closing it: once
+     * closed, the descriptor number can be handed to a new connection.
+     */
+    if (tw->fout >= 0) {
+        network_unregister_fd(tw->fout);
+        close(tw->fout);
+    }
+    if (tw->ferr >= 0) {
+        network_unregister_fd(tw->ferr);
+        close(tw->ferr);
+    }
     if (tw->sout)
         free_stream(tw->sout);
     if (tw->serr)
@@ -175,26 +201,41 @@ write_all(int fd, const char *buffer, size_t length)
     return 1;
 }
 
+/* Move whatever the child has written to `fd' into `stream'.
+ *
+ * A read of 0 bytes is end-of-file: the child has closed its end and
+ * there will never be more.  A pipe at end-of-file is always "readable",
+ * so the network loop must stop watching it, or its poll returns at once
+ * for ever and the server spins.  The descriptor itself stays open until
+ * free_task_waiting_on_exec() closes it.
+ */
+static void
+drain_pipe(int fd, Stream *stream)
+{
+    char buffer[1000];
+    ssize_t n;
+
+    while ((n = read(fd, buffer, sizeof(buffer))) > 0)
+        stream_add_string(stream, raw_bytes_to_binary(buffer, n, true));
+
+    if (n == 0)
+        network_unregister_fd(fd);
+}
+
 static void
 stdout_readable(int fd, void *data)
 {
     task_waiting_on_exec *tw = (task_waiting_on_exec *)data;
-    char buffer[1000];
-    int n;
-    while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
-        stream_add_string(tw->sout, raw_bytes_to_binary(buffer, n));
-    }
+
+    drain_pipe(fd, tw->sout);
 }
 
 static void
 stderr_readable(int fd, void *data)
 {
     task_waiting_on_exec *tw = (task_waiting_on_exec *)data;
-    char buffer[1000];
-    int n;
-    while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
-        stream_add_string(tw->serr, raw_bytes_to_binary(buffer, n));
-    }
+
+    drain_pipe(fd, tw->serr);
 }
 
 static pid_t
@@ -205,6 +246,8 @@ fork_and_exec(const char *cmd, const char *const args[], const char *const env[]
     int pipeIn[2];
     int pipeOut[2];
     int pipeErr[2];
+    posix_spawn_file_actions_t actions;
+    int status;
 
     if (pipe(pipeIn) < 0) {
         log_perror("EXEC: Couldn't create pipe - in");
@@ -218,33 +261,38 @@ fork_and_exec(const char *cmd, const char *const args[], const char *const env[]
         log_perror("EXEC: Couldn't create pipe - err");
         goto close_out;
     }
-    else if ((pid = fork()) < 0) {
-        log_perror("EXEC: Couldn't fork");
+
+    /* Start the child with posix_spawn() rather than fork() + execve().
+     * fork() copies the page tables of the whole server, so its cost grows
+     * with the size of the database in memory and the server stalls for
+     * that long on every exec().  posix_spawn() does not copy them.
+     *
+     * In the child: the pipes become stdin, stdout and stderr, and the
+     * parent's ends are closed.
+     */
+    if ((status = posix_spawn_file_actions_init(&actions)) != 0) {
+        errno = status;
+        log_perror("EXEC: Couldn't set up spawn");
         goto close_err;
     }
-    else if (0 == pid) { /* child */
-        int status;
+    if ((status = posix_spawn_file_actions_adddup2(&actions, pipeIn[0], STDIN_FILENO)) != 0
+            || (status = posix_spawn_file_actions_adddup2(&actions, pipeOut[1], STDOUT_FILENO)) != 0
+            || (status = posix_spawn_file_actions_adddup2(&actions, pipeErr[1], STDERR_FILENO)) != 0
+            || (status = posix_spawn_file_actions_addclose(&actions, pipeIn[1])) != 0
+            || (status = posix_spawn_file_actions_addclose(&actions, pipeOut[0])) != 0
+            || (status = posix_spawn_file_actions_addclose(&actions, pipeErr[0])) != 0) {
+        errno = status;
+        log_perror("EXEC: Couldn't set up spawn");
+        posix_spawn_file_actions_destroy(&actions);
+        goto close_err;
+    }
 
-        if ((status = dup2(pipeIn[0], STDIN_FILENO)) < 0) {
-            perror("dup2");
-            exit(status);
-        }
-        if ((status = dup2(pipeOut[1], STDOUT_FILENO)) < 0) {
-            perror("dup2");
-            exit(status);
-        }
-        if ((status = dup2(pipeErr[1], STDERR_FILENO)) < 0) {
-            perror("dup2");
-            exit(status);
-        }
-
-        close(pipeIn[1]);
-        close(pipeOut[0]);
-        close(pipeErr[0]);
-
-        status = execve(cmd, (char *const *)args, (char *const *)env);
-        perror("execve");
-        exit(status);
+    status = posix_spawn(&pid, cmd, &actions, nullptr, (char *const *)args, (char *const *)env);
+    posix_spawn_file_actions_destroy(&actions);
+    if (status != 0) {
+        errno = status;
+        log_perror("EXEC: Couldn't spawn");
+        goto close_err;
     }
 
     close(pipeIn[0]);

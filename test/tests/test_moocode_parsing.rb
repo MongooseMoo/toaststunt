@@ -293,4 +293,16 @@ class TestMoocodeParsing < Test::Unit::TestCase
     end
   end
 
+  def test_that_decompiling_keeps_the_parentheses_a_negative_number_needs
+    run_test_as('programmer') do
+      o = create(:nothing)
+      add_verb(o, [player, 'xd', 'negative'], ['this', 'none', 'this'])
+      ['(-5):foo();', '(-5).bar;', '(-5)[1];', '(-5)[1..2];', '(-2.5):foo();',
+       '-5 ^ 2;', 'x - -5;', '{-5, -2.5};', '-x:foo();', '5 .bar;'].each do |line|
+        assert_equal [], set_verb_code(o, 'negative', [line])
+        assert_equal line, verb_code(o, 'negative')
+      end
+    end
+  end
+
 end

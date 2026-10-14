@@ -210,6 +210,7 @@ set(src_CRYPT
 
 set(src_CXXSRCS
     src/ast.cc
+    src/ast_map.cc
     src/base64.cc
     src/code_gen.cc
     src/collection.cc
