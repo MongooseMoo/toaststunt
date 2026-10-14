@@ -49,3 +49,11 @@ Ordered string-line validation and scalar-semantics bulk FileIO regressions:
 
 This uses the same isolated server/Ruby framework. Write/flush fault controls
 require POSIX /dev/full. See docs/Features/string_lines.md for the API contract.
+
+Maintained WAIF owner allocation counts and deferred-finalizer controls:
+
+    python3 test/run_map_order_regressions.py build/moo --test test_waif_owner_count.rb
+    python3 test/run_waif_owner_count_reload.py build/moo --reload-from /path/to/old/moo
+
+The reload test verifies distinct allocations and saved native continuations
+across two candidate-runtime reloads. See docs/Features/waif_owner_count.md.

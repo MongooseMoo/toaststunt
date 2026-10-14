@@ -37,6 +37,9 @@
 
 static unsigned long waif_count = 0;
 static std::unordered_map<Objid, unsigned int> waif_class_count;
+/* Allocated instances, including pending finalizers and resurrected waifs.
+ * Owners are immutable object-number slots, not object incarnations. */
+static std::unordered_map<Objid, unsigned long> waif_owner_count;
 std::unordered_map<Waif *, bool> destroyed_waifs;
 
 #define PROP_MAPPED(Mmap, Mbit) ((Mmap)[(Mbit) / 32] & (1 << ((Mbit) % 32)))
@@ -283,6 +286,7 @@ new_waif(Objid _class, Objid owner)
     res.v.waif->propvals = alloc_waif_propvals(res.v.waif, 1);
     ++waif_count;
     waif_class_count[_class]++;
+    waif_owner_count[owner]++;
 
     return res;
 }
@@ -572,6 +576,12 @@ free_waif(Waif *waif)
 {
     int i, cnt;
 
+    auto owner_count = waif_owner_count.find(waif->owner);
+    if (owner_count == waif_owner_count.end() || owner_count->second == 0)
+        panic_moo("free_waif(): missing owner count");
+    if (--owner_count->second == 0)
+        waif_owner_count.erase(owner_count);
+
     waif_class_count[waif->_class]--;
     if (waif_class_count[waif->_class] <= 0)
         waif_class_count.erase(waif->_class);
@@ -628,11 +638,26 @@ bf_waif_stats(Var arglist, Byte next, void *vdata, Objid progr)
     return make_var_pack(r);
 }
 
+static package
+bf_waif_owner_count(Var arglist, Byte next, void *vdata, Objid progr)
+{
+    Objid owner = arglist.v.list[1].v.obj;
+    free_var(arglist);
+
+    if (owner != progr && !is_wizard(progr))
+        return make_error_pack(E_PERM);
+
+    auto count = waif_owner_count.find(owner);
+    return make_var_pack(Var::new_int(count == waif_owner_count.end()
+                                     ? 0 : count->second));
+}
+
 void
 register_waif()
 {
     register_function("new_waif", 0, 0, bf_new_waif);
     register_function("waif_stats", 0, 0, bf_waif_stats);
+    register_function("waif_owner_count", 1, 1, bf_waif_owner_count, TYPE_OBJ);
 }
 
 /* Waif property permissions are derived from the class object's property
@@ -996,6 +1021,7 @@ read_waif()
         res.v.waif->map[i] = 0;
     propdefs_length = dbio_read_num();
     waif_class_count[res.v.waif->_class]++;
+    waif_owner_count[res.v.waif->owner]++;
 
     /* Read propvals into the `packable' array until we run out of
      * mappable props, then allocate the finished value array and
