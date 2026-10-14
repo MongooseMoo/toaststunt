@@ -1,0 +1,38 @@
+name: Native build and connection lifecycle
+on:
+  pull_request:
+  push:
+    branches: [mongoose]
+  merge_group:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  test:
+    name: Build and native connection tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check workflow syntax and security
+        run: |
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color
+          pipx run --spec zizmor==1.30.1 zizmor --offline --pedantic .github/workflows
+      - name: Install native build and wire-test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build bison gperf nettle-dev libargon2-dev libpcre2-dev libcurl4-openssl-dev libaspell-dev libsqlite3-dev libssl-dev ruby ruby-parslet ruby-test-unit
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel 2
+      - name: Verify private close facts through native connections
+        run: python3 test/run_map_order_regressions.py build/moo --test test_connection_close_fact.rb
+      - name: Verify native player switching
+        run: python3 test/run_map_order_regressions.py build/moo --test test_switch_player.rb
+      - name: Verify incarnation validity and property permissions
+        run: python3 test/run_map_order_regressions.py build/moo --test test_incarnation_validity.rb

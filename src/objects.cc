@@ -16,6 +16,7 @@
  *****************************************************************************/
 
 #include <vector>
+#include <cstring>
 
 #include "collection.h"
 #include "db.h"
@@ -282,7 +283,7 @@ bf_typeof(Var arglist, Byte next, void *vdata, Objid progr)
 
 static package
 bf_valid(Var arglist, Byte next, void *vdata, Objid progr)
-{   /* (object) */
+{   /* (object [, expected incarnation]) */
     Var r;
 
     if (arglist.v.list[1].is_object()) {
@@ -292,6 +293,26 @@ bf_valid(Var arglist, Byte next, void *vdata, Objid progr)
     else {
         free_var(arglist);
         return make_error_pack(E_TYPE);
+    }
+
+    if (r.v.num && arglist.v.list[0].v.num == 2) {
+        Var object = arglist.v.list[1];
+        if (object.type == TYPE_WAIF) {
+            // Waifs have reference identity, rather than recycled object slots.
+            r.v.num = 0;
+        } else {
+            Var incarnation;
+            db_prop_handle identity = db_find_property(object, "incarnation_id", &incarnation);
+            if (!identity.ptr) {
+                r.v.num = 0;
+            } else if (!db_property_allows(identity, progr, PF_READ)) {
+                free_var(arglist);
+                return make_error_pack(E_PERM);
+            } else {
+                r.v.num = incarnation.type == TYPE_STR && *incarnation.v.str &&
+                          !std::strcmp(incarnation.v.str, arglist.v.list[2].v.str);
+            }
+        }
     }
 
     free_var(arglist);
@@ -1373,7 +1394,7 @@ register_objects(void)
                                       bf_recycle_read, bf_recycle_write,
                                       TYPE_ANY);
     register_function("object_bytes", 1, 1, bf_object_bytes, TYPE_ANY);
-    register_function("valid", 1, 1, bf_valid, TYPE_ANY);
+    register_function("valid", 1, 2, bf_valid, TYPE_ANY, TYPE_STR);
     register_function("chparents", 2, 2, bf_chparent_chparents,
                       TYPE_ANY, TYPE_LIST);
     register_function("chparent", 2, 2, bf_chparent_chparents,
