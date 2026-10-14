@@ -546,6 +546,31 @@ call_notifier(Objid player, Objid handler, const char *verb_name)
 {
     Var args;
 
+    // Record the native close before game callbacks can suspend or hide their
+    // public presence timestamp. The optional core property is private, and
+    // carries the object's incarnation so recycled slots cannot inherit it.
+    if (valid(player) &&
+        (!strcmp(verb_name, "user_disconnected") ||
+         !strcmp(verb_name, "user_client_disconnected"))) {
+        Var incarnation;
+        db_prop_handle identity = db_find_property(Var::new_obj(player),
+                                                   "incarnation_id", &incarnation);
+        if (identity.ptr && incarnation.type == TYPE_STR && *incarnation.v.str) {
+            Var closed = new_list(2);
+            closed.v.list[1] = var_ref(incarnation);
+            closed.v.list[2] = Var::new_int(time(nullptr));
+            db_prop_handle stamp = db_find_property(Var::new_obj(player),
+                                                    "_connection_closed", nullptr);
+            if (stamp.ptr && !stamp.built_in &&
+                is_wizard(db_property_owner(stamp)) &&
+                !(db_property_flags(stamp) & (PF_READ | PF_WRITE))) {
+                db_set_property_value(stamp, closed);
+            } else {
+                free_var(closed);
+            }
+        }
+    }
+
     args = new_list(1);
     args.v.list[1].type = TYPE_OBJ;
     args.v.list[1].v.obj = player;
