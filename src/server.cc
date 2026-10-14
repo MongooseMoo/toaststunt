@@ -1566,7 +1566,7 @@ server_receive_line(server_handle sh, const char *line, bool out_of_band)
 
     if (sizeof(oob_prefix) > 1 && strncmp(oob_prefix, line, sizeof(oob_prefix) - 1) == 0)
         out_of_band = true;
-    else
+    if (!out_of_band)
         h->last_activity_time = time(nullptr);
 
     new_input_task(h->tasks, line, h->binary, out_of_band);
