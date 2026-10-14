@@ -14,6 +14,14 @@ removes the old object's properties; an explicit incarnation renewal also makes
 the previous fact unusable. Restored checkpoint connections receive the normal
 disconnect callback and a close fact when the runtime retires them on startup.
 
+`valid(object, expected_incarnation)` checks both object validity and an exact,
+nonempty `incarnation_id` in one native call. It preserves property read
+permissions and reports `E_PERM` for a hidden identity. Missing or nonstring
+identities do not match. Numbered and anonymous objects are supported; waifs
+use reference identity and do not match this slot-incarnation form. Existing
+one-argument `valid()` behavior is unchanged. This is identity metadata, not
+authorization. Callers still validate their account and operation permissions.
+
 Run the existing isolated native wire harness:
 
 ```
