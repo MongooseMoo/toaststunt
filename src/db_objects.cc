@@ -239,6 +239,7 @@ dbpriv_new_object(Num new_objid, bool anonymous)
 
     o = objects[new_objid] = (Object *)mymalloc(sizeof(Object), mem_type);
     o->id = new_objid;
+    o->anonymous_storage = anonymous;
 
     o->waif_propdefs = nullptr;
 
@@ -253,6 +254,7 @@ dbpriv_new_anonymous_object(void)
     ensure_new_object();
     o = objects[num_objects] = (Object *)mymalloc(sizeof(Object), M_ANON);
     o->id = NOTHING;
+    o->anonymous_storage = true;
     num_objects++;
 
     o->waif_propdefs = nullptr;
@@ -445,6 +447,7 @@ db_make_anonymous(Objid oid, Objid last)
     db_set_last_used_objid(last);
 
     o->id = NOTHING;
+    o->anonymous_storage = true;
 
     free_var(o->children);
     free_var(o->location);

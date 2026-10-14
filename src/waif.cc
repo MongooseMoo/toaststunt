@@ -912,7 +912,13 @@ write_waif(Var v)
      * the saved waif will be trashed.  Has to be before the next
      * bit because that's where we trash it!
      */
-    update_waif_propdefs(w);
+    Object *classp = dbpriv_find_object(w->_class);
+    /* Dump IDs assigned to anonymous objects must not revive an invalid
+     * numbered class, including after a failed or unforked save attempt. */
+    if (!classp || classp->anonymous_storage)
+        invalidate_waif(w);
+    else
+        update_waif_propdefs(w);
 
     /* Save the propval map info (for forked checkpoints we'll have to
      * clobber it before saving to stash the index).  Then allocate a
