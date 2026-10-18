@@ -345,6 +345,7 @@ db_destroy_object(Objid oid)
             o->children.v.list[0].v.num != 0)
         panic_moo("DB_DESTROY_OBJECT: Not a barren orphan!");
 
+    retire_connection_binding(oid);
     free_var(o->parents);
     free_var(o->children);
 
@@ -571,6 +572,7 @@ db_renumber_object(Objid old)
     for (_new = 0; _new < old; _new++) {
         if (objects[_new] == nullptr && !waif_uses_object_slot(_new)) {
             /* Change the identity of the object. */
+            retire_connection_binding(old);
             o = objects[_new] = objects[old];
             objects[old] = nullptr;
             objects[_new]->id = _new;

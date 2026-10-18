@@ -111,6 +111,7 @@ extern void set_server_cmdline(const char *line);
 				 */
 
 #include "structures.h"
+#include "network_origin.h"
 
 extern int server_flag_option(const char *name, int defallt);
 				/* If both $server_options and
@@ -281,9 +282,14 @@ enum Fork_Result {
 };
 extern enum Fork_Result fork_server(const char *subtask_name);
 
-extern void player_switched(Objid old_id, Objid new_id, bool silent);
+extern bool reserve_connection_binding(Objid old_id, ConnectionBindingReservation &reservation);
+extern void retire_connection_binding(Objid actor);
+extern Var connection_binding_to_var(const ConnectionBinding &binding);
+extern void player_switched(Objid old_id, Objid new_id, bool silent,
+                            const ConnectionBindingReservation &reservation);
 extern void player_connected(Objid old_id, Objid new_id,
-			     bool is_newly_created);
+                             bool is_newly_created,
+                             const ConnectionBindingReservation &reservation);
 extern int is_player_connected(Objid player);
 extern void notify(Objid player, const char *message);
 extern void boot_player(Objid player);

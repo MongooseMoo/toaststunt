@@ -24,6 +24,7 @@
 #include "parse_cmd.h"
 #include "program.h"
 #include "structures.h"
+#include "network_origin.h"
 
 typedef struct {
     Program *prog;
@@ -65,6 +66,7 @@ extern void free_activation(activation *, char data_too);
 
 typedef struct {
     int task_id;
+    NetworkOrigin network_origin;
     Var local;
     activation *activ_stack;
     unsigned max_stack_size;

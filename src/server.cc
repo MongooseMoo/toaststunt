@@ -148,10 +148,109 @@ typedef struct shandle {
     bool outbound, binary;
     bool print_messages;
     std::atomic<bool> disconnect_me;
+    ConnectionBindingState binding;
+    uint16_t accepted_local_port;
 } shandle;
 
 static shandle *all_shandles = nullptr;
 std::recursive_mutex all_shandles_mutex;
+static unsigned char native_boot_nonce[16];
+static Num physical_connection_head = 0;
+
+static ConnectionBinding
+binding_snapshot(const shandle *h)
+{
+    ConnectionBinding binding{};
+    memcpy(binding.boot, native_boot_nonce, sizeof(binding.boot));
+    binding.physical = h->binding.physical;
+    binding.epoch = h->binding.epoch;
+    binding.actor = h->player;
+    return binding;
+}
+
+Var
+connection_binding_to_var(const ConnectionBinding &binding)
+{
+    static const char hex[] = "0123456789abcdef";
+    char nonce[33];
+    for (size_t i = 0; i < sizeof(binding.boot); i++) {
+        nonce[2 * i] = hex[binding.boot[i] >> 4];
+        nonce[2 * i + 1] = hex[binding.boot[i] & 15];
+    }
+    nonce[32] = '\0';
+    Var result = new_list(4);
+    result.v.list[1] = str_dup_to_var(nonce);
+    result.v.list[2] = Var::new_int(binding.physical);
+    result.v.list[3] = Var::new_int(binding.epoch);
+    result.v.list[4] = Var::new_obj(binding.actor);
+    return result;
+}
+
+bool
+reserve_connection_binding(Objid old_id, ConnectionBindingReservation &reservation)
+{
+    std::lock_guard<std::recursive_mutex> lock(all_shandles_mutex);
+    shandle *disconnecting = nullptr;
+    for (shandle *h = all_shandles; h; h = h->next) {
+        if (h->player != old_id)
+            continue;
+        if (h->disconnect_me.load()) {
+            if (!disconnecting)
+                disconnecting = h;
+        } else {
+            Num epoch;
+            if (!reserve_binding_epoch(h->binding, epoch))
+                return false;
+            reservation = {h, old_id, epoch};
+            return true;
+        }
+    }
+    // Return-login can boot its negative connection and still return an
+    // actor. Preserve that rebind, but never issue it a receipt. A live incoming
+    // handle always wins over a refcount-retained disconnecting duplicate.
+    if (disconnecting) {
+        reservation = {disconnecting, old_id, 0};
+        return true;
+    }
+    return false;
+}
+
+void
+retire_connection_binding(Objid actor)
+{
+    std::lock_guard<std::recursive_mutex> lock(all_shandles_mutex);
+    for (shandle *h = all_shandles; h; h = h->next)
+        if (h->player == actor)
+            h->binding.retired = true;
+}
+
+/* Called under all_shandles_mutex. No callback lies between reservation and here. */
+static shandle *
+commit_connection_binding(const ConnectionBindingReservation &reservation, Objid actor)
+{
+    shandle *incoming = nullptr;
+    for (shandle *h = all_shandles; h; h = h->next)
+        if (h == reservation.handle && h->player == reservation.old_actor) {
+            incoming = h;
+            break;
+        }
+    if (!incoming)
+        panic_moo("Connection binding reservation lost its incoming handle");
+    for (shandle *h = all_shandles; h; h = h->next)
+        if (h != incoming && h->player == actor)
+            h->binding.retired = true;
+    incoming->player = actor;
+    // Native I/O can mark a reserved socket for disconnect. Preserve existing
+    // actor/notifier sequencing while retiring its authority permanently until
+    // a later genuine rebind, even if a notifier clears disconnect_me again.
+    if (incoming->disconnect_me.load() || reservation.epoch == 0)
+        incoming->binding.retired = true;
+    else if (!incoming->binding.permanent_none) {
+        incoming->binding.epoch = reservation.epoch;
+        incoming->binding.retired = false;
+    }
+    return incoming;
+}
 
 typedef struct slistener {
     Var desc;
@@ -1394,6 +1493,14 @@ init_random(void)
     long seed;
     unsigned char soskey[32];
 
+    /* Independent OS entropy, even under TEST; do not consume the old PRNG stream. */
+    int nonce_fd = open(RANDOM_DEVICE, O_RDONLY);
+    if (nonce_fd < 0 || !read_connection_nonce(nonce_fd, native_boot_nonce)) {
+        errlog("Can't read native connection boot nonce from " RANDOM_DEVICE "!\n");
+        exit(1);
+    }
+    close(nonce_fd);
+
     memset(soskey, 0, sizeof(soskey));
 
 #ifndef TEST
@@ -1516,6 +1623,11 @@ server_new_connection(server_listener sl, network_handle nh, bool outbound)
 
     all_shandles_mutex.lock();
 
+    h->binding = new_connection_binding(physical_connection_head);
+    lock_connection_name_mutex(nh);
+    h->accepted_local_port = network_source_port(nh);
+    unlock_connection_name_mutex(nh);
+
     h->next = all_shandles;
     h->prev = &all_shandles;
     if (all_shandles)
@@ -1592,13 +1704,25 @@ server_receive_line(server_handle sh, const char *line, bool out_of_band)
 {
     static char oob_prefix[] = OUT_OF_BAND_PREFIX;
     shandle *h = (shandle *) sh.ptr;
+    NetworkOrigin origin{};
+    {
+        std::lock_guard<std::recursive_mutex> lock(all_shandles_mutex);
+        if (!h->disconnect_me.load() && advance_network_input(h->binding)) {
+            origin.binding = binding_snapshot(h);
+            origin.ordinal = h->binding.input_head;
+            origin.telnet_oob = out_of_band;
+            origin.listener = h->listener;
+            origin.local_port = h->accepted_local_port;
+            origin.outbound = h->outbound;
+        }
+    }
 
     if (sizeof(oob_prefix) > 1 && strncmp(oob_prefix, line, sizeof(oob_prefix) - 1) == 0)
         out_of_band = true;
     if (!out_of_band)
         h->last_activity_time = time(nullptr);
 
-    new_input_task(h->tasks, line, h->binary, out_of_band);
+    new_input_task(h->tasks, line, h->binary, out_of_band, origin);
 }
 
 void
@@ -1716,16 +1840,16 @@ proxy_connected(Objid connection, char *command)
 }
 
 void
-player_connected(Objid old_id, Objid new_id, bool is_newly_created)
+player_connected(Objid old_id, Objid new_id, bool is_newly_created,
+                 const ConnectionBindingReservation &reservation)
 {
-    shandle *existing_h = find_shandle(new_id);
-    shandle *new_h = find_shandle(old_id);
-
-    if (!new_h)
-        panic_moo("Non-existent shandle connected");
-
-    new_h->player = new_id;
-    new_h->connection_time = time(nullptr);
+    shandle *existing_h, *new_h;
+    {
+        std::lock_guard<std::recursive_mutex> lock(all_shandles_mutex);
+        existing_h = find_shandle(new_id);
+        new_h = commit_connection_binding(reservation, new_id);
+        new_h->connection_time = time(nullptr);
+    }
 
     if (existing_h) {
         /* we now have two shandles with the same player value while
@@ -1786,19 +1910,19 @@ player_connected(Objid old_id, Objid new_id, bool is_newly_created)
 }
 
 void
-player_switched(Objid old_id, Objid new_id, bool silent)
+player_switched(Objid old_id, Objid new_id, bool silent,
+                const ConnectionBindingReservation &reservation)
 {
     const char *old_name = str_dup(object_name(old_id));
-    shandle *existing_h = find_shandle(new_id);
-    shandle *new_h = find_shandle(old_id);
+    shandle *existing_h, *new_h;
     const char *status = nullptr;
-
-    if (!new_h)
-        panic_moo("Non-existent shandle connected");
-
-    new_h->switched = old_id;
-    new_h->player = new_id;
-    new_h->connection_time = time(nullptr);
+    {
+        std::lock_guard<std::recursive_mutex> lock(all_shandles_mutex);
+        existing_h = find_shandle(new_id);
+        new_h = commit_connection_binding(reservation, new_id);
+        new_h->switched = old_id;
+        new_h->connection_time = time(nullptr);
+    }
 
     if (existing_h) {
         status = "REDIRECTED:";
@@ -3330,9 +3454,37 @@ bool is_shutdown_triggered()
     return shutdown_triggered;
 }
 
+static package
+bf_connection_binding(Var arglist, Byte next, void *vdata, Objid progr)
+{
+    Objid actor = arglist.v.list[1].v.obj;
+    free_var(arglist);
+    if (progr != actor && !is_wizard(progr))
+        return make_error_pack(E_PERM);
+    ConnectionBinding binding{};
+    Num head = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lock(all_shandles_mutex);
+        for (shandle *h = all_shandles; h; h = h->next)
+            if (h->player == actor && !h->disconnect_me.load()
+                    && !h->binding.retired && !h->binding.permanent_none) {
+                binding = binding_snapshot(h);
+                head = h->binding.input_head;
+                break;
+            }
+    }
+    if (!binding.physical)
+        return make_var_pack(zero);
+    Var result = new_list(2);
+    result.v.list[1] = connection_binding_to_var(binding);
+    result.v.list[2] = Var::new_int(head);
+    return make_var_pack(result);
+}
+
 void
 register_server(void)
 {
+    register_function("connection_binding", 1, 1, bf_connection_binding, TYPE_OBJ);
     register_function("server_version", 0, 1, bf_server_version, TYPE_ANY);
     register_function("renumber", 1, 1, bf_renumber, TYPE_OBJ);
     register_function("reset_max_object", 0, 0, bf_reset_max_object);
