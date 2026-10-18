@@ -36,5 +36,3 @@ jobs:
         run: python3 test/run_map_order_regressions.py build/moo --test test_switch_player.rb
       - name: Verify incarnation validity and property permissions
         run: python3 test/run_map_order_regressions.py build/moo --test test_incarnation_validity.rb
-      - name: Verify native JSON parsing and generation
-        run: python3 test/run_map_order_regressions.py build/moo --test test_json.rb

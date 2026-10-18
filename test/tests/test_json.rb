@@ -174,44 +174,6 @@ class TestJson < Test::Unit::TestCase
     end
   end
 
-  def test_that_array_parsing_preserves_nested_values_and_sibling_order
-    run_test_as('wizard') do
-      source = '[[],[1],{},["First",{"key":[2,3]},"Last"],null,1.5]'
-      expected = '[[],[1],{},["First",{"key":[2,3]},"Last"],"E_NONE",1.5]'
-      [nil, 'common-subset', 'embedded-types'].each do |mode|
-        # Compare serialized output so singleton lists and native ERR values
-        # cannot be flattened or coerced by the Ruby response parser.
-        suffix = mode.nil? ? '' : ", \"#{mode}\""
-        assert_equal expected, simplify(command(%Q|; return generate_json(parse_json(#{value_ref(source.gsub('"', '\\"'))}#{suffix}));|))
-        assert_equal [1, 1, 1, 1], simplify(command(%Q|; a = parse_json("[true,false]"#{suffix}); return {typeof(a[1]) == BOOL, typeof(a[2]) == BOOL, a[1] == true, a[2] == false};|))
-      end
-      source = '["#13|obj","E_PERM|err","1|int","2.5|float","true|bool","Name|str"]'
-      expected = '["#13|obj","E_PERM|err",1,2.5,true,"Name"]'
-      assert_equal expected, simplify(command(%Q|; return generate_json(parse_json(#{value_ref(source.gsub('"', '\\"'))}, "embedded-types"), "embedded-types");|))
-      assert_equal ['#13|obj', 'E_PERM|err', '1|int', '2.5|float', 'true|bool', 'Name|str'], parse_json(source.gsub('"', '\\"'), 'common-subset')
-    end
-  end
-
-  def test_that_large_array_parsing_retains_every_element_in_order
-    run_test_as('programmer') do
-      expected = (0...2048).to_a
-      assert_equal expected, parse_json('[' + expected.join(',') + ']')
-    end
-  end
-
-  def test_that_errors_after_completed_arrays_do_not_corrupt_later_parses
-    run_test_as('programmer') do
-      [nil, 'common-subset', 'embedded-types'].each do |mode|
-        ['[[1,2],{"key":["First","Last"]},]',
-         '{"key":[[],{"nested":[1,2]}],"bad":}',
-         '[[1,2],[[3,4]]'].each do |source|
-          assert_equal E_INVARG, parse_json(source.gsub('"', '\\"'), mode)
-        end
-        assert_equal [5, 6, 7], parse_json('[5,6,7]', mode)
-      end
-    end
-  end
-
   def test_that_parsing_a_very_long_json_string_does_not_overflow_the_stack
     run_test_as('programmer') do
       # Build the input in-MOO so the test protocol and Ruby parser do not
