@@ -26,7 +26,6 @@
     - owned_objects (returns all valid objects owned by an object)
     - connection_name_lookup (perform a DNS name lookup)
     - connection_info (show detailed information about a particular connection)
-    - connection_binding, task_network_origin (runtime connection identity and original input provenance; see [network_origin.md](network_origin.md))
     - parse_ansi (parses color tags into their ANSI equivalents)
     - remove_ansi (strips ANSI tags from strings)
     - parse_ast, verb_ast, unparse_ast, validate_ast (read and write MOO code as syntax trees; see [ast.md](ast.md))
