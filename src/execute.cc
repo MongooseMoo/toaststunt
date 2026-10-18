@@ -222,6 +222,7 @@ static enum error
 suspend_task(package p)
 {
     vm the_vm = new_vm(current_task_id, var_ref(current_local), top_activ_stack + 1);
+    the_vm->network_origin = current_network_origin;
     unsigned int i;
     enum error e;
 
@@ -3144,6 +3145,7 @@ run_interpreter(char raise, enum error e,
                 lag_info.v.list[1].v.list[6] = var_ref(nothing);
             }
             lag_info.v.list[2] = total_cputime;
+            ScopedNetworkOrigin no_network_origin;
             do_server_verb_task(Var::new_obj(SYSTEM_OBJECT), "handle_lagging_task", lag_info, handle, activ_stack[0].player, "", nullptr, 0);
         }
     }
@@ -3169,6 +3171,7 @@ run_interpreter(char raise, enum error e,
         h = db_find_callable_verb(Var::new_obj(SYSTEM_OBJECT), handler_verb_name);
         if (do_db_tracebacks && h.ptr)
         {
+            ScopedNetworkOrigin no_network_origin;
             hret = do_server_verb_task(Var::new_obj(SYSTEM_OBJECT), handler_verb_name,
                                        var_ref(args), h,
                                        activ_stack[0].player, "", &handled,
@@ -3254,6 +3257,7 @@ enum outcome
 resume_from_previous_vm(vm the_vm, Var v)
 {
     unsigned int i;
+    current_network_origin = the_vm->network_origin;
 
     check_activ_stack_size(the_vm->max_stack_size);
     top_activ_stack = the_vm->top_activ_stack;

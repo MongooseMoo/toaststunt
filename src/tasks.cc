@@ -65,6 +65,7 @@ typedef enum {
 
 typedef struct forked_task {
     int id;
+    NetworkOrigin network_origin;
     Program *program;
     activation a;
     Var *rt_env;
@@ -82,6 +83,7 @@ typedef struct {
     char *string;
     int length;
     struct task *next_itail;    /* see tqueue.first_itail */
+    NetworkOrigin network_origin;
 } input_task;
 
 typedef struct task {
@@ -230,6 +232,7 @@ typedef struct ext_queue {
 
 Var current_local;
 int current_task_id;
+NetworkOrigin current_network_origin{};
 static tqueue *idle_tqueues = nullptr, *active_tqueues = nullptr;
 static task *waiting_tasks = nullptr;   /* forked and suspended tasks */
 static ext_queue *external_queues = nullptr;
@@ -806,11 +809,12 @@ static
 enum outcome
 run_server_task_setting_id(Objid player, Var what, const char *verb,
                            Var args, const char *argstr, Var *result,
-                           int *task_id);
+                           int *task_id, const NetworkOrigin &origin = NetworkOrigin{});
 
 static int
-do_command_task(tqueue * tq, char *command)
+do_command_task(tqueue * tq, char *command, const NetworkOrigin &origin)
 {
+    ScopedNetworkOrigin task_origin(origin);
     if (tq->program_stream) {   /* We're programming */
         if (strcmp(command, ".") == 0)  /* Done programming */
             end_programming(tq);
@@ -837,7 +841,7 @@ do_command_task(tqueue * tq, char *command)
             args = parse_into_wordlist(command);
             if (run_server_task_setting_id(tq->player, Var::new_obj(tq->handler),
                                            "do_command", args, command,
-                                           &result, &(tq->last_input_task_id))
+                                           &result, &(tq->last_input_task_id), origin)
                     != OUTCOME_DONE
                     || is_true(result)) {
                 /* Do nothing more; we assume :do_command handled it. */
@@ -864,6 +868,7 @@ do_command_task(tqueue * tq, char *command)
 
             /* clean up after `run_server_task_setting_id' */
             current_task_id = -1;
+            current_network_origin = {};
             free_var(current_local);
             free_var(result);
         }
@@ -875,8 +880,9 @@ do_command_task(tqueue * tq, char *command)
 }
 
 static int
-do_login_task(tqueue * tq, char *command)
+do_login_task(tqueue * tq, char *command, const NetworkOrigin &origin)
 {
+    ScopedNetworkOrigin task_origin(origin);
     Var result;
     Var args;
     Objid old_max_object = db_last_used_objid();
@@ -896,7 +902,7 @@ do_login_task(tqueue * tq, char *command)
         if (command[0] == '\0') {
             Var do_blank_command_result;
             run_server_task_setting_id(tq->player, Var::new_obj(tq->handler), "do_blank_command",
-                                       parse_into_wordlist(command), command, &do_blank_command_result, &(tq->last_input_task_id));
+                                       parse_into_wordlist(command), command, &do_blank_command_result, &(tq->last_input_task_id), origin);
             if (!is_true(do_blank_command_result))
                 return 1;
         }
@@ -913,7 +919,7 @@ do_login_task(tqueue * tq, char *command)
     args = parse_into_wordlist(clear_command ? "\0" : command);
     run_server_task_setting_id(tq->player, Var::new_obj(tq->handler),
                                "do_login_command", args, clear_command ? "\0" : command,
-                               &result, &(tq->last_input_task_id));
+                               &result, &(tq->last_input_task_id), origin);
     /* The connected player (tq->player) may be non-negative if
      * `do_login_command' already called the `switch_player' built-in
      * to log the connection in to a player.
@@ -923,6 +929,15 @@ do_login_task(tqueue * tq, char *command)
         Objid old_player = tq->player;
         tqueue *dead_tq = find_tqueue(new_player, 0);
         task *t;
+
+        ConnectionBindingReservation reservation{};
+        if (!reserve_connection_binding(old_player, reservation)) {
+            current_task_id = -1;
+            current_network_origin = {};
+            free_var(current_local);
+            free_var(result);
+            return 1;
+        }
 
         tq->player = new_player;
         if (tq->num_bg_tasks) {
@@ -953,13 +968,15 @@ do_login_task(tqueue * tq, char *command)
          * another task
          */
         current_task_id = -1;
+        current_network_origin = {};
         free_var(current_local);
         free_var(result);
-        player_connected(old_player, new_player, new_player > old_max_object);
+        player_connected(old_player, new_player, new_player > old_max_object, reservation);
     } else {
         /* clean up after `run_server_task_setting_id'
          */
         current_task_id = -1;
+        current_network_origin = {};
         free_var(current_local);
         free_var(result);
     }
@@ -967,10 +984,13 @@ do_login_task(tqueue * tq, char *command)
 }
 
 static void
-do_out_of_band_command(tqueue * tq, char *command)
+do_out_of_band_command(tqueue * tq, char *command, const NetworkOrigin &origin)
 {
-    run_server_task(tq->player, Var::new_obj(tq->handler), "do_out_of_band_command",
-                    parse_into_wordlist(command), command, nullptr);
+    run_server_task_setting_id(tq->player, Var::new_obj(tq->handler), "do_out_of_band_command",
+                    parse_into_wordlist(command), command, nullptr, nullptr, origin);
+    current_task_id = -1;
+    current_network_origin = {};
+    free_var(current_local);
 }
 
 static int
@@ -1072,7 +1092,8 @@ tasks_connection_options(task_queue q, Var list)
 #undef TASK_CO_TABLE
 
 static void
-enqueue_input_task(tqueue * tq, const char *input, int at_front, int binary, bool is_telnet)
+enqueue_input_task(tqueue * tq, const char *input, int at_front, int binary, bool is_telnet,
+                   const NetworkOrigin &origin = NetworkOrigin{})
 {
     static char oob_prefix[] = OUT_OF_BAND_PREFIX;
     task *t;
@@ -1092,6 +1113,7 @@ enqueue_input_task(tqueue * tq, const char *input, int at_front, int binary, boo
         t->kind = TASK_INBAND;
 
     t->t.input.string = str_dup(input);
+    t->t.input.network_origin = origin;
     tq->total_input_length += (t->t.input.length = strlen(input));
 
     t->t.input.next_itail = nullptr;
@@ -1168,7 +1190,8 @@ flush_input(tqueue * tq, int show_messages)
 }
 
 void
-new_input_task(task_queue q, const char *input, int binary, bool out_of_band)
+new_input_task(task_queue q, const char *input, int binary, bool out_of_band,
+                const NetworkOrigin &origin)
 {
     tqueue *tq = (tqueue *)q.ptr;
 
@@ -1176,7 +1199,7 @@ new_input_task(task_queue q, const char *input, int binary, bool out_of_band)
         flush_input(tq, 1);
         return;
     }
-    enqueue_input_task(tq, input, 0/*at-rear*/, binary, out_of_band);
+    enqueue_input_task(tq, input, 0/*at-rear*/, binary, out_of_band, origin);
 }
 
 static void
@@ -1211,6 +1234,7 @@ enqueue_forked(Program * program, activation a, Var * rt_env,
     task *t = (task *)mymalloc(sizeof(task), M_TASK);
 
     t->kind = TASK_FORKED;
+    t->t.forked.network_origin = {};
     t->t.forked.program = program;
     /* The next two lines were not present before 1.8.2.  a.rt_env/prog
      * were never accessed and were eventually overwritten by
@@ -1666,6 +1690,7 @@ run_ready_tasks(void)
                 v.v.err = E_INVARG;
                 resume_from_previous_vm(tq->reading_vm, v);
                 current_task_id = -1;
+                current_network_origin = {};
                 free_var(current_local);
                 did_one = 1;
             }
@@ -1685,9 +1710,13 @@ run_ready_tasks(void)
                         panic_moo("Unexpected task kind in run_ready_tasks()");
                         break;
                     case TASK_OOB:
-                        do_out_of_band_command(tq, t->t.input.string);
+                    {
+                        NetworkOrigin origin = t->t.input.network_origin;
+                        origin.kind = NetworkInputKind::Oob;
+                        do_out_of_band_command(tq, t->t.input.string, origin);
                         did_one = 1;
                         break;
+                    }
                     case TASK_BINARY:
                     case TASK_INBAND:
                         if (tq->reading && tq->parsing) {
@@ -1742,6 +1771,7 @@ run_ready_tasks(void)
                                 resume_from_previous_vm(tq->reading_vm, v);
                                 free_var(v);
                                 current_task_id = -1;
+                                current_network_origin = {};
                                 free_var(current_local);
                             }
                             did_one = 1;
@@ -1756,6 +1786,7 @@ run_ready_tasks(void)
                             v.v.str = t->t.input.string;
                             resume_from_previous_vm(tq->reading_vm, v);
                             current_task_id = -1;
+                            current_network_origin = {};
                             free_var(current_local);
                             did_one = 1;
                         } else {
@@ -1764,9 +1795,12 @@ run_ready_tasks(void)
                              * restriction.
                              */
                             add_command_to_history(tq->player, t->t.input.string);
+                            NetworkOrigin origin = t->t.input.network_origin;
+                            origin.kind = t->kind == TASK_BINARY ? NetworkInputKind::Binary
+                                                                 : NetworkInputKind::Inband;
                             did_one = (tq->player >= 0
                                        ? do_command_task
-                                       : do_login_task) (tq, t->t.input.string);
+                                       : do_login_task) (tq, t->t.input.string, origin);
                         }
                         break;
                     case TASK_FORKED:
@@ -1774,11 +1808,13 @@ run_ready_tasks(void)
                         forked_task ft;
                         ft = t->t.forked;
                         current_task_id = ft.id;
+                        current_network_origin = ft.network_origin;
                         current_local = new_map();
                         ft.a.threaded = DEFAULT_THREAD_MODE;
                         do_forked_task(ft.program, ft.rt_env, ft.a,
                                        ft.f_index);
                         current_task_id = -1;
+                        current_network_origin = {};
                         free_var(current_local);
                         did_one = 1;
                     }
@@ -1791,10 +1827,12 @@ run_ready_tasks(void)
                         /* must free value passed in to resume_task() and do_resume() */
                         free_var(t->t.suspended.value);
                         current_task_id = -1;
+                        current_network_origin = {};
                         free_var(current_local);
                         did_one = 1;
                         break;
                 }
+                current_network_origin = {};
                 free_task(t, 0);
             }
 
@@ -1826,11 +1864,14 @@ enum outcome
 run_server_task(Objid player, Var what, const char *verb, Var args,
                 const char *argstr, Var *result)
 {
+    ScopedNetworkOrigin no_network_origin;
     enum outcome ret = run_server_task_setting_id(player, what, verb,
                        args, argstr,
                        result, nullptr);
 
     current_task_id = -1;
+
+    current_network_origin = {};
     free_var(current_local);
 
     return ret;
@@ -1845,11 +1886,12 @@ static
 enum outcome
 run_server_task_setting_id(Objid player, Var what, const char *verb,
                            Var args, const char *argstr, Var *result,
-                           int *task_id)
+                           int *task_id, const NetworkOrigin &origin)
 {
     db_verb_handle h;
 
     current_task_id = new_task_id();
+    ScopedNetworkOrigin task_origin(origin);
     current_local = new_map();
 
     if (task_id)
@@ -1877,7 +1919,9 @@ run_server_program_task(Objid _this, const char *verb, Var args, Objid vloc,
                         int debug, Objid player, const char *argstr,
                         Var *result)
 {
+    ScopedNetworkOrigin no_network_origin;
     current_task_id = new_task_id();
+    current_network_origin = {};
     current_local = new_map();
 
     enum outcome ret = do_server_program_task(Var::new_obj(_this), verb, args, Var::new_obj(vloc), verbname, program,
@@ -1885,6 +1929,8 @@ run_server_program_task(Objid _this, const char *verb, Var args, Objid vloc,
                        result, 1/*traceback*/);
 
     current_task_id = -1;
+
+    current_network_origin = {};
     free_var(current_local);
 
     return ret;
@@ -2981,6 +3027,10 @@ bf_switch_player(Var arglist, Byte next, void *vdata, Objid progr)
     tqueue *dead_tq = find_tqueue(new_player, 0);
     task *t;
 
+    ConnectionBindingReservation reservation{};
+    if (!reserve_connection_binding(old_player, reservation))
+        return make_error_pack(E_QUOTA);
+
     tq->player = new_player;
     if (tq->num_bg_tasks) {
         /* Cute; this un-logged-in connection has some queued tasks!
@@ -3006,7 +3056,7 @@ bf_switch_player(Var arglist, Byte next, void *vdata, Objid progr)
         dead_tq->num_bg_tasks = 0;
     }
 
-    player_switched(old_player, new_player, silent);
+    player_switched(old_player, new_player, silent, reservation);
 
     return no_var_pack();
 }
@@ -3040,9 +3090,30 @@ bf_set_thread_mode(Var arglist, Byte next, void *vdata, Objid progr)
     }
 }
 
+static package
+bf_task_network_origin(Var arglist, Byte next, void *vdata, Objid progr)
+{
+    free_var(arglist);
+    const NetworkOrigin origin = current_network_origin;
+    if (!origin.binding.physical || !origin.ordinal || origin.kind == NetworkInputKind::None)
+        return make_var_pack(zero);
+    const char *kind = origin.kind == NetworkInputKind::Oob ? "oob"
+                       : origin.kind == NetworkInputKind::Binary ? "binary" : "inband";
+    Var result = new_list(7);
+    result.v.list[1] = connection_binding_to_var(origin.binding);
+    result.v.list[2] = Var::new_int(origin.ordinal);
+    result.v.list[3] = str_dup_to_var(kind);
+    result.v.list[4] = Var::new_int(origin.telnet_oob ? 1 : 0);
+    result.v.list[5] = Var::new_obj(origin.listener);
+    result.v.list[6] = Var::new_int(origin.local_port);
+    result.v.list[7] = Var::new_int(origin.outbound ? 1 : 0);
+    return make_var_pack(result);
+}
+
 void
 register_tasks(void)
 {
+    register_function("task_network_origin", 0, 0, bf_task_network_origin);
     register_function("task_id", 0, 0, bf_task_id);
     register_function("queued_tasks", 0, 2, bf_queued_tasks, TYPE_INT, TYPE_INT);
 #ifdef SAVE_FINISHED_TASKS
