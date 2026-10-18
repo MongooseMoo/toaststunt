@@ -394,16 +394,12 @@ static int
 handle_end_array(void *ctx)
 {
     struct parse_context *pctx = (struct parse_context *)ctx;
-    int count = 0;
-    for (struct stack_item *item = pctx->top;
-            (int)item->v.type != ARRAY_SENTINEL; item = item->prev)
-        count++;
-
-    Var list = new_list(count);
-    /* POP transfers ownership; reverse stack order restores JSON order. */
-    for (int i = count; i > 0; i--)
-        list.v.list[i] = POP(pctx->top);
-    POP(pctx->top); /* array sentinel */
+    Var list = new_list(0);
+    Var v;
+    for (v = POP(pctx->top); (int)v.type > ARRAY_SENTINEL;
+            v = POP(pctx->top)) {
+        list = listinsert(list, v, 1);
+    }
     PUSH(pctx->top, list);
     pctx->depth--;
     return 1;

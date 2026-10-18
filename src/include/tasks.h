@@ -37,8 +37,7 @@ extern Var tasks_connection_options(task_queue, Var);
 extern int tasks_set_connection_option(task_queue, const char *,
 				       Var);
 
-extern void new_input_task(task_queue, const char *, int, bool,
-                           const NetworkOrigin &origin = NetworkOrigin{});
+extern void new_input_task(task_queue, const char *, int, bool);
 extern void task_suspend_input(task_queue);
 extern enum error enqueue_forked_task2(activation a, int f_index,
 			       double after_seconds, int vid);
@@ -102,18 +101,6 @@ extern enum outcome run_server_program_task(Objid _this, const char *verb,
 
 extern Var current_local;
 extern int current_task_id;
-extern NetworkOrigin current_network_origin;
-
-/* For native nested server callbacks: their own suspended VM must capture NONE. */
-class ScopedNetworkOrigin {
-    NetworkOrigin saved;
-public:
-    explicit ScopedNetworkOrigin(const NetworkOrigin &origin = NetworkOrigin{})
-        : saved(current_network_origin) { current_network_origin = origin; }
-    ~ScopedNetworkOrigin() { current_network_origin = saved; }
-    ScopedNetworkOrigin(const ScopedNetworkOrigin &) = delete;
-    ScopedNetworkOrigin &operator=(const ScopedNetworkOrigin &) = delete;
-};
 extern bool threading_active;
 extern int last_input_task_id(Objid player);
 #ifdef SAVE_FINISHED_TASKS
