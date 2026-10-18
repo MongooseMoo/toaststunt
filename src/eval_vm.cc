@@ -36,7 +36,6 @@ new_vm(int task_id, Var local, int stack_size)
     vm the_vm = (vm)mymalloc(sizeof(vmstruct), M_VM);
 
     the_vm->task_id = task_id;
-    the_vm->network_origin = {};
     the_vm->local = local;
     the_vm->activ_stack = (activation *)mymalloc(sizeof(activation) * stack_size, M_VM);
 
