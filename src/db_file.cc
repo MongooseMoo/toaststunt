@@ -1260,6 +1260,7 @@ db_load(void)
         errlog("DB_LOAD: Cannot load database!\n");
         return 0;
     }
+    db_note_all_owners();
     oklog("LOADING: %s done, will dump new database on %s\n",
           input_db_name, dump_db_name);
 
