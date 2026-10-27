@@ -959,7 +959,8 @@ moving_contents:
                 db_change_parents(obj, nothing, none);
 
 #ifdef SAFE_RECYCLE
-                db_fixup_owners(obj.v.obj);
+                if (db_object_is_owner(obj.v.obj))
+                    db_fixup_owners(obj.v.obj);
 #endif
 
                 incr_quota(db_object_owner(oid));

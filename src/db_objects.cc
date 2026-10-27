@@ -54,6 +54,10 @@ static Num max_objects = 0;
  * like children(), we just keep track of them here. */
 static std::unordered_map<Objid, std::unordered_set<Object*>> anonymous_objects;
 
+/* Owner numbers that named no object when they were stored. An object later
+ * created with one of these numbers starts out marked as an owner. */
+static std::unordered_set<Objid> unbound_owners;
+
 static Var all_users;
 
 #ifdef USE_ANCESTOR_CACHE
@@ -240,10 +244,50 @@ dbpriv_new_object(Num new_objid, bool anonymous)
     o = objects[new_objid] = (Object *)mymalloc(sizeof(Object), mem_type);
     o->id = new_objid;
     o->anonymous_storage = anonymous;
+    o->is_owner = unbound_owners.erase(new_objid) > 0;
 
     o->waif_propdefs = nullptr;
 
     return o;
+}
+
+void
+db_note_owner(Objid owner)
+{
+    if (owner < 0)
+        return;
+    if (owner < num_objects && objects[owner] && !objects[owner]->anonymous_storage)
+        objects[owner]->is_owner = true;
+    else
+        unbound_owners.insert(owner);
+}
+
+static void
+note_owners_in(Object *o)
+{
+    db_note_owner(o->owner);
+    for (Verbdef *v = o->verbdefs; v; v = v->next)
+        db_note_owner(v->owner);
+    for (unsigned int i = 0; i < o->nval; i++)
+        db_note_owner(o->propval[i].owner);
+}
+
+void
+db_note_all_owners(void)
+{
+    for (Objid oid = 0; oid < num_objects; oid++)
+        if (objects[oid])
+            note_owners_in(objects[oid]);
+
+    for (const auto& x : anonymous_objects)
+        for (const auto& y : x.second)
+            note_owners_in(y);
+}
+
+bool
+db_object_is_owner(Objid oid)
+{
+    return objects[oid]->is_owner;
 }
 
 Object *
@@ -255,6 +299,7 @@ dbpriv_new_anonymous_object(void)
     o = objects[num_objects] = (Object *)mymalloc(sizeof(Object), M_ANON);
     o->id = NOTHING;
     o->anonymous_storage = true;
+    o->is_owner = false;
     num_objects++;
 
     o->waif_propdefs = nullptr;
@@ -942,6 +987,7 @@ void
 dbpriv_set_object_owner(Object *o, Objid owner)
 {
     o->owner = owner;
+    db_note_owner(owner);
 }
 
 Objid

@@ -77,6 +77,10 @@ typedef struct Object {
     /* Native allocation kind, independent of permissions and temporary dump
      * object IDs. Initialized by every allocator; not part of the DB format. */
     bool anonymous_storage;
+    /* Set once this object's number is stored in any owner field (object,
+     * verb or property value); never cleared while it lives. recycle()
+     * skips the SAFE_RECYCLE owner scan when it is clear. Not in the DB. */
+    bool is_owner;
 } Object;
 
 /*
