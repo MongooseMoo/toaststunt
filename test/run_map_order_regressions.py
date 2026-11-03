@@ -1,6 +1,7 @@
 """Run map regressions against a disposable Test.db, never the live MOO."""
 import argparse
 import pathlib
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -46,6 +47,14 @@ def main():
         root = pathlib.Path(temp)
         # Match test/files in the normal test checkout for FileIO suites.
         (root / "files").mkdir()
+        if args.test == "test_exec.rb":
+            executables = root / "executables"
+            executables.mkdir()
+            for executable in (test_root / "executables").iterdir():
+                (executables / executable.name).symlink_to(executable.resolve())
+            for name in ("echo", "sleep", "true"):
+                if not (executables / name).exists():
+                    (executables / name).symlink_to(shutil.which(name))
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
             port = reservation.getsockname()[1]
