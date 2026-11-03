@@ -66,6 +66,8 @@ typedef struct task_waiting_on_exec {
     const char *in;
     const char **env;
     int len;
+    int written;
+    bool input_error;
     pid_t pid;
     task_waiting_status status;
     int code;
@@ -97,11 +99,25 @@ malloc_task_waiting_on_exec()
     tw->args = nullptr;
     tw->in = nullptr;
     tw->env = nullptr;
+    tw->len = 0;
+    tw->written = 0;
+    tw->input_error = false;
+    tw->fin = tw->fout = tw->ferr = -1;
     tw->status = TWS_CONTINUE;
     tw->code = 0;
     tw->sout = new_stream(1000);
     tw->serr = new_stream(1000);
     return tw;
+}
+
+static void
+close_stdin(task_waiting_on_exec *tw)
+{
+    if (tw->fin >= 0) {
+        network_unregister_fd(tw->fin);
+        close(tw->fin);
+        tw->fin = -1;
+    }
 }
 
 static void
@@ -123,10 +139,15 @@ free_task_waiting_on_exec(task_waiting_on_exec * tw)
     }
     if (tw->in)
         free_str(tw->in);
-    close(tw->fout);
-    close(tw->ferr);
-    network_unregister_fd(tw->fout);
-    network_unregister_fd(tw->ferr);
+    close_stdin(tw);
+    if (tw->fout >= 0) {
+        network_unregister_fd(tw->fout);
+        close(tw->fout);
+    }
+    if (tw->ferr >= 0) {
+        network_unregister_fd(tw->ferr);
+        close(tw->ferr);
+    }
     if (tw->sout)
         free_stream(tw->sout);
     if (tw->serr)
@@ -161,18 +182,32 @@ exec_waiter_enumerator(task_closure closure, void *data)
     return action;
 }
 
-static int
-write_all(int fd, const char *buffer, size_t length)
+static void
+stdin_writable(int fd, void *data)
 {
-    ssize_t count;
-    while (length) {
-        if ((count = write(fd, buffer, length)) < 0)
-            return -1;
-        buffer += count;
-        length -= count;
+    task_waiting_on_exec *tw = (task_waiting_on_exec *)data;
+    while (tw->written < tw->len) {
+        ssize_t count = write(fd, tw->in + tw->written, tw->len - tw->written);
+        if (count > 0) {
+            tw->written += count;
+        } else if (count < 0 && errno == EINTR) {
+            continue;
+        } else if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return;
+        } else {
+            /* Resume through the normal exec completion owner, outside
+             * the network callback. A real write failure remains E_EXEC.
+             */
+            BLOCK_SIGCHLD;
+            tw->input_error = true;
+            if (tw->status == TWS_CONTINUE)
+                tw->status = TWS_STOP;
+            sigchild_interrupt = 1;
+            UNBLOCK_SIGCHLD;
+            break;
+        }
     }
-    fsync(fd);
-    return 1;
+    close_stdin(tw);
 }
 
 static void
@@ -317,18 +352,16 @@ exec_waiter_suspender(vm the_vm, void *data)
 
     oklog("%s\n", reset_stream(logmsg));
 
-    set_nonblocking(tw->fin);
-    set_nonblocking(tw->fout);
-    set_nonblocking(tw->ferr);
-
-    if (tw->in) {
-        if (write_all(tw->fin, tw->in, tw->len) < 0) {
-            error = E_EXEC;
-            goto close_fin;
-        }
+    if (!set_nonblocking(tw->fin) || !set_nonblocking(tw->fout)
+            || !set_nonblocking(tw->ferr)) {
+        error = E_EXEC;
+        goto clear_process_slot;
     }
 
-    close(tw->fin);
+    if (tw->len)
+        network_register_fd(tw->fin, nullptr, stdin_writable, tw);
+    else
+        close_stdin(tw);
 
     network_register_fd(tw->fout, stdout_readable, nullptr, tw);
     network_register_fd(tw->ferr, stderr_readable, nullptr, tw);
@@ -338,9 +371,6 @@ exec_waiter_suspender(vm the_vm, void *data)
     /* success */
     UNBLOCK_SIGCHLD;
     return E_NONE;
-
-close_fin:
-    close(tw->fin);
 
 clear_process_slot:
     process_table[i] = nullptr;
@@ -553,16 +583,20 @@ deal_with_child_exit(void)
         tw = process_table[i];
         if (tw && TWS_STOP == tw->status) {
             Var v;
-            v = new_list(3);
-            v.v.list[1].type = TYPE_INT;
-            v.v.list[1].v.num = tw->code;
-            stdout_readable(tw->fout, tw);
-            v.v.list[2].type = TYPE_STR;
-            v.v.list[2].v.str = str_dup(reset_stream(tw->sout));
-            stderr_readable(tw->ferr, tw);
-            v.v.list[3].type = TYPE_STR;
-            v.v.list[3].v.str = str_dup(reset_stream(tw->serr));
-
+            if (tw->input_error || tw->written < tw->len) {
+                v.type = TYPE_ERR;
+                v.v.err = E_EXEC;
+            } else {
+                v = new_list(3);
+                v.v.list[1].type = TYPE_INT;
+                v.v.list[1].v.num = tw->code;
+                stdout_readable(tw->fout, tw);
+                v.v.list[2].type = TYPE_STR;
+                v.v.list[2].v.str = str_dup(reset_stream(tw->sout));
+                stderr_readable(tw->ferr, tw);
+                v.v.list[3].type = TYPE_STR;
+                v.v.list[3].v.str = str_dup(reset_stream(tw->serr));
+            }
             resume_task(tw->the_vm, v);
         }
         if (tw && TWS_CONTINUE != tw->status) {

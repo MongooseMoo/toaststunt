@@ -35,6 +35,21 @@ class TestExec < Test::Unit::TestCase
     end
   end
 
+  def test_that_large_stdin_and_output_are_serviced_together
+    run_test_as('wizard') do
+      # test_io reads a line, then echoes it to both stdout and stderr.
+      # This exceeds pipe capacity in all three directions.
+      assert_equal 1, eval('input = " "; for i in [1..17] input = input + input; endfor input = input + "end"; r = exec({"test_io"}, input); return equal(r, {0, "end", "end"});')
+      assert_equal 1, eval('input = "x"; for i in [1..17] input = input + input; endfor r = exec({"test_io"}, input); return equal(r, {0, input, input});')
+    end
+  end
+
+  def test_that_large_stdin_to_a_child_that_does_not_read_still_fails
+    run_test_as('wizard') do
+      assert_equal E_EXEC, eval('input = "x"; for i in [1..20] input = input + input; endfor return exec({"true"}, input);')
+    end
+  end
+
   def test_that_args_works
     run_test_as('wizard') do
       r = exec(['test_args', 'one', 'two', 'three'], '')
