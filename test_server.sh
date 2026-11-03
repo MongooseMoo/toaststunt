@@ -40,7 +40,7 @@ start_server() {
     echo "Port: $port" >> server.log
     echo "==================" >> server.log
     
-    nohup ./moo Test.db /dev/null $port >> server.log 2>&1 &
+    nohup ./moo Test.db /tmp/toast-test-out.db $port >> server.log 2>&1 &
     local server_pid=$!
     echo $server_pid > "$SERVER_PID_FILE"
     

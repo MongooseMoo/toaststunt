@@ -54,7 +54,7 @@ ln -s `which true` executables/true
 ./test_server.sh logs     # Show server logs
 
 # Manual approach:
-./moo Test.db /dev/null 9898 &  # Start server in background
+./moo Test.db /tmp/toast-test-out.db 9898 &  # Start server in background. Never give /dev/null as the output when running as root: a server without the guard in dump_database() replaces the device with a regular file.
 PATH="$HOME/.rbenv/bin:$PATH" make  # Run all tests with rbenv in PATH
 ```
 

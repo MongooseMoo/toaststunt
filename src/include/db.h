@@ -105,6 +105,7 @@ extern Var db_anon_debug(Var options, Var arguments);
 extern int valid(Objid);
 extern int is_valid(Var);
 
+/* Returns NOTHING if an appended slot would exceed object-table capacity. */
 extern Objid db_create_object(Num new_objid, bool anonymous = false);
 				/* Creates a new object with parent & location
 				 * == #-1.  Returns new object's id number.
@@ -665,6 +666,19 @@ extern void db_delete_verb(db_verb_handle);
 				/* Deletes the given verb entirely.  This
 				 * db_verb_handle may not be used again after
 				 * this call returns.
+				 */
+
+extern void db_note_owner(Objid owner);
+				/* Record that OWNER's number has been stored in an
+				 * owner field.  Every owner assignment calls this.
+				 */
+extern void db_note_all_owners(void);
+				/* Mark every owner in the database; run once after
+				 * loading.
+				 */
+extern bool db_object_is_owner(Objid oid);
+				/* True if OID has ever been stored as an owner since
+				 * it was created; false means no owner field names it.
 				 */
 
 extern void db_fixup_owners(const Objid obj);

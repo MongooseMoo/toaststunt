@@ -16,6 +16,7 @@
  *****************************************************************************/
 
 #include <vector>
+#include <cstring>
 
 #include "collection.h"
 #include "db.h"
@@ -31,6 +32,7 @@
 #include "structures.h"
 #include "utils.h"
 #include "log.h"
+#include "waif.h"
 
 static int
 controls(Objid who, Objid what)
@@ -281,7 +283,7 @@ bf_typeof(Var arglist, Byte next, void *vdata, Objid progr)
 
 static package
 bf_valid(Var arglist, Byte next, void *vdata, Objid progr)
-{   /* (object) */
+{   /* (object [, expected incarnation]) */
     Var r;
 
     if (arglist.v.list[1].is_object()) {
@@ -291,6 +293,26 @@ bf_valid(Var arglist, Byte next, void *vdata, Objid progr)
     else {
         free_var(arglist);
         return make_error_pack(E_TYPE);
+    }
+
+    if (r.v.num && arglist.v.list[0].v.num == 2) {
+        Var object = arglist.v.list[1];
+        if (object.type == TYPE_WAIF) {
+            // Waifs have reference identity, rather than recycled object slots.
+            r.v.num = 0;
+        } else {
+            Var incarnation;
+            db_prop_handle identity = db_find_property(object, "incarnation_id", &incarnation);
+            if (!identity.ptr) {
+                r.v.num = 0;
+            } else if (!db_property_allows(identity, progr, PF_READ)) {
+                free_var(arglist);
+                return make_error_pack(E_PERM);
+            } else {
+                r.v.num = incarnation.type == TYPE_STR && *incarnation.v.str &&
+                          !std::strcmp(incarnation.v.str, arglist.v.list[2].v.str);
+            }
+        }
     }
 
     free_var(arglist);
@@ -389,6 +411,13 @@ bf_create(Var arglist, Byte next, void *vdata, Objid progr)
             Objid last = db_last_used_objid();
             Objid oid = db_create_object(-1, anonymous);
             Var args;
+
+            if (oid == NOTHING) {
+                if (valid(owner))
+                    incr_quota(owner);
+                free_var(arglist);
+                return make_error_pack(E_QUOTA);
+            }
 
             db_set_object_owner(oid, !valid(owner) ? oid : owner);
 
@@ -491,6 +520,13 @@ bf_recreate(Var arglist, Byte next, void *vdata, Objid progr)
                     && !db_object_allows(arglist.v.list[2], progr, FLAG_FERTILE))) {
             free_var(arglist);
             return make_error_pack(E_PERM);
+        }
+
+        /* Keep legacy argument and authority errors ahead of the new slot
+         * refusal, and refuse before debiting quota or calling initialize. */
+        if (waif_uses_object_slot(arglist.v.list[1].v.obj)) {
+            free_var(arglist);
+            return make_error_pack(E_INVARG);
         }
 
         if (valid(owner) && !decr_quota(owner)) {
@@ -923,7 +959,8 @@ moving_contents:
                 db_change_parents(obj, nothing, none);
 
 #ifdef SAFE_RECYCLE
-                db_fixup_owners(obj.v.obj);
+                if (db_object_is_owner(obj.v.obj))
+                    db_fixup_owners(obj.v.obj);
 #endif
 
                 incr_quota(db_object_owner(oid));
@@ -1298,7 +1335,7 @@ bf_next_recycled_object(Var arglist, Byte next, void *vdata, Objid progr)
     package ret = make_var_pack(Var::new_int(0));
 
     for (; i_obj <= max_obj; i_obj++) {
-        if (!valid(i_obj)) {
+        if (!valid(i_obj) && !waif_uses_object_slot(i_obj)) {
             ret = make_var_pack(Var::new_obj(i_obj));
             break;
         }
@@ -1358,7 +1395,7 @@ register_objects(void)
                                       bf_recycle_read, bf_recycle_write,
                                       TYPE_ANY);
     register_function("object_bytes", 1, 1, bf_object_bytes, TYPE_ANY);
-    register_function("valid", 1, 1, bf_valid, TYPE_ANY);
+    register_function("valid", 1, 2, bf_valid, TYPE_ANY, TYPE_STR);
     register_function("chparents", 2, 2, bf_chparent_chparents,
                       TYPE_ANY, TYPE_LIST);
     register_function("chparent", 2, 2, bf_chparent_chparents,

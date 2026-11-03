@@ -10,6 +10,8 @@
 #include "log.h"                        // errlog
 #include "map.h"
 #include <unordered_map>
+#include <signal.h>                     // SIGCHLD
+#include <pthread.h>                    // pthread_sigmask
 
 /*
   A general-purpose extension for doing work in separate threads. The entrypoint (background_thread)
@@ -47,6 +49,27 @@ static uint16_t next_background_handle = 1;
 pthread_mutex_t shutdown_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t shutdown_condition = PTHREAD_COND_INITIALIZER;
 uint16_t shutdown_complete = false;
+
+/* Start a thread pool whose threads never receive SIGCHLD. A new thread inherits the signal mask of
+ * the thread that creates it, so the signal is blocked here for the length of thpool_init().
+ *
+ * The SIGCHLD handler (child_completed_signal() in server.cc) reaps children and updates the exec
+ * subsystem's process table. exec.cc keeps the handler out of its critical sections by blocking
+ * SIGCHLD in the main thread. That only works if the main thread is the only one that can run the
+ * handler: a process-directed signal goes to any thread that has it unblocked. */
+static threadpool
+init_pool_without_sigchld(int num_threads)
+{
+    sigset_t sigchld, previous;
+
+    sigemptyset(&sigchld);
+    sigaddset(&sigchld, SIGCHLD);
+    pthread_sigmask(SIG_BLOCK, &sigchld, &previous);
+    threadpool pool = thpool_init(num_threads);
+    pthread_sigmask(SIG_SETMASK, &previous, nullptr);
+
+    return pool;
+}
 
 /* Make sure creating a new thread won't exceed MAX_BACKGROUND_THREADS or $server_options.max_background_threads */
 static bool can_create_thread()
@@ -314,7 +337,7 @@ static package bf_thread_pool(Var arglist, Byte next, void *vdata, Objid progr)
         if (value <= 0)
             *the_pool = nullptr;
         else
-            *the_pool = thpool_init(value);
+            *the_pool = init_pool_without_sigchld(value);
         return make_var_pack(Var::new_int(1));
     } else {
         return make_raise_pack(E_INVARG, "Invalid function", str_dup_to_var(func));
@@ -352,7 +375,7 @@ void
 register_background()
 {
     register_task_queue(background_enumerator);
-    background_pool = thpool_init(TOTAL_BACKGROUND_THREADS);
+    background_pool = init_pool_without_sigchld(TOTAL_BACKGROUND_THREADS);
     register_function("threads", 0, 0, bf_threads);
     register_function("thread_pool", 2, 3, bf_thread_pool, TYPE_STR, TYPE_STR, TYPE_INT);
 #ifdef BACKGROUND_TEST
