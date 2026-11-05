@@ -1179,10 +1179,21 @@ retryDumping:
             fclose(f);
             oklog("%s on %s finished\n", reason_names[reason], temp_name);
             if (reason != DUMP_PANIC) {
-                remove(dump_db_name);
-                if (rename(temp_name, dump_db_name) != 0) {
-                    log_perror("Renaming temporary dump file");
-                    success = 0;
+                struct stat target;
+
+                if (stat(dump_db_name, &target) == 0 && !S_ISREG(target.st_mode)) {
+                    /* An output such as /dev/null means "don't keep the dump".
+                     * Run as root, remove() and rename() would replace the
+                     * device node itself with a regular file. */
+                    oklog("%s: %s is not a regular file; discarding %s\n",
+                          reason_names[reason], dump_db_name, temp_name);
+                    remove(temp_name);
+                } else {
+                    remove(dump_db_name);
+                    if (rename(temp_name, dump_db_name) != 0) {
+                        log_perror("Renaming temporary dump file");
+                        success = 0;
+                    }
                 }
             }
         }
