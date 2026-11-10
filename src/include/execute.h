@@ -137,4 +137,9 @@ extern Var make_rt_var_map(Var * rt_env, const char **var_names, unsigned size);
 extern bool get_thread_mode();
 extern void set_thread_mode(bool mode);
 
+/* Transient line coverage follows task IDs, never checkpointed VMs. */
+extern enum error coverage_inherit_task(int parent, int child);
+extern void coverage_task_finished(int task_id);
+extern void coverage_program_changed(Program *program);
+
 #endif

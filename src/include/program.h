@@ -35,6 +35,7 @@ typedef struct {
     DB_Version version;
     unsigned first_lineno;
     unsigned ref_count;
+    bool coverage_obsolete;
 
     Bytecodes main_vector;
 

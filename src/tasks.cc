@@ -611,6 +611,7 @@ free_task(task * t, int strong)
             break;
         case TASK_FORKED:
             if (strong) {
+                coverage_task_finished(t->t.forked.id);
                 free_rt_env(t->t.forked.rt_env,
                             t->t.forked.program->num_var_names);
                 if(t->t.forked.a._this.type == TYPE_WAIF)
@@ -1289,6 +1290,7 @@ enqueue_forked_task2(activation a, int f_index, double after_seconds, int vid)
     rt_env = copy_rt_env(a.rt_env, a.prog->num_var_names);
     when = double_to_start_tv(after_seconds);
     enqueue_forked(a.prog, a, rt_env, f_index, when, id);
+    coverage_inherit_task(current_task_id, id);
     return E_NONE;
 }
 
@@ -2802,6 +2804,9 @@ do_resume(int id, Var value, Objid progr)
 
         if (!is_wizard(progr) && progr != owner)
             return E_PERM;
+        enum error coverage_error = coverage_inherit_task(current_task_id, id);
+        if (coverage_error != E_NONE)
+            return coverage_error;
         gettimeofday(&t->t.suspended.start_tv, nullptr);    /* runnable now */
         free_var(t->t.suspended.value);
         t->t.suspended.value = value;
@@ -2821,6 +2826,9 @@ do_resume(int id, Var value, Objid progr)
                 if (!is_wizard(progr) && progr != tq->player)
                     return E_PERM;
                 /* already resumed, but we have a new value for it */
+                enum error coverage_error = coverage_inherit_task(current_task_id, id);
+                if (coverage_error != E_NONE)
+                    return coverage_error;
                 free_var(t->t.suspended.value);
                 t->t.suspended.value = value;
                 return E_NONE;

@@ -1,0 +1,58 @@
+# Task coverage builtins
+
+## Goal
+
+Implement issue 795 coverage_start() and coverage_stop() off upstream master and
+merge into mongoose. Q authorized implementation with "Make it so!". No production
+deployment or in-MOO framework changes are included.
+
+## State
+
+Native implementation, documentation and Ruby wire regressions are written in
+an isolated master-based worktree. No local builds or tests have run. Verification
+uses the existing native PR CI workflow and disposable Test.db runner, extended
+with test_coverage.rb. Pending source inspection, CI and normal mongoose merge.
+
+## Decisions and why
+
+The source spec is on the host at
+~/agent-workspace/tasks/issue-795-cpu-for-bugs/coverage-builtin-spec.md.
+It explicitly says its Toast source claims were not checked by its author.
+The VM, task queues, traceback mapper, program lifetime, verb replacement,
+registration and Ruby helpers were inspected directly before implementation.
+
+The existing execute/task owners hold one transient session per recording and
+task-ID associations. Forks and successful explicit resumes inherit it; ordinary
+suspension preserves it. Stop detaches all members. Owner completion, kill and
+abort discard the session; child completion retains its already-recorded hits.
+Independent sessions cannot be combined by resume().
+
+The opcode path takes one disabled pointer check. While enabled, recording stores
+PC bits per program and bytecode vector. Only stop calls find_line_number().
+Program replacement clears old bitmaps and marks obsolete programs, including
+old suspended activations first observed after replacement. Program references
+keep recorded bytecode valid until stop or owner cleanup.
+
+Toast rejects list map keys. The spec permits verb-name keys, so the result uses
+"#definer:full verb names" mapped to sorted unique line numbers. A replaced
+program produces an empty list at "!changed:#definer:full verb names". Hits for
+the replacement, if executed, use the normal key. docs/coverage.md documents the
+precise API, lifetime, errors and limitations. Optional executable-line
+enumeration and hit counts are omitted.
+
+The existing mongoose CI workflow and disposable runner are brought onto this
+master-based branch at the same repository paths. The workflow retains its
+existing checks and adds the coverage suite. PR integration supplies the existing
+mongoose-only tests; no second runner or test execution path is introduced.
+
+## Surprises
+
+The mongoose checkout contains unrelated dirty changes to its exec task note and
+untracked logs. Preserve them. The primary checkout and numerous existing
+worktrees also contain unrelated work; none may be cleaned up for this task.
+
+## Next step
+
+Inspect the complete diff, publish the scoped feature for PR CI against mongoose,
+repair failures, verify the final tested integration, merge normally, push and
+remove only this task's worktree and feature branch. Do not restart production.

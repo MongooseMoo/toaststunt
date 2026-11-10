@@ -16,6 +16,11 @@
  *****************************************************************************/
 
 #include <chrono>
+#include <map>
+#include <memory>
+#include <set>
+#include <string>
+#include <vector>
 #include <string.h>
 #include <stdarg.h>
 
@@ -101,6 +106,169 @@ static Var type_mismatch_value(int n_args, ...);
 /* macros to ease indexing into activation stack */
 #define RUN_ACTIV     activ_stack[top_activ_stack]
 #define CALLER_ACTIV  activ_stack[top_activ_stack - 1]
+
+struct CoverageProgram {
+    Program *program;
+    std::string name, key;
+    bool changed = false;
+    std::map<int, std::vector<unsigned char>> bits;
+
+    CoverageProgram(activation &a, const std::string &key)
+        : program(program_ref(a.prog)), name(a.verbname), key(key) {}
+    ~CoverageProgram() { free_program(program); }
+};
+
+struct CoverageSession {
+    int owner;
+    std::vector<std::unique_ptr<CoverageProgram>> programs;
+    CoverageProgram *last = nullptr;
+    explicit CoverageSession(int owner) : owner(owner) {}
+};
+
+static std::map<int, std::shared_ptr<CoverageSession>> coverage_tasks;
+static CoverageSession *coverage_active = nullptr;
+
+static void
+coverage_select_task(int id)
+{
+    auto task = coverage_tasks.find(id);
+    coverage_active = task == coverage_tasks.end() ? nullptr : task->second.get();
+}
+
+static void
+coverage_close(CoverageSession *session)
+{
+    if (coverage_active == session)
+        coverage_active = nullptr;
+    for (auto it = coverage_tasks.begin(); it != coverage_tasks.end(); ) {
+        if (it->second.get() == session)
+            it = coverage_tasks.erase(it);
+        else
+            ++it;
+    }
+}
+
+enum error
+coverage_inherit_task(int parent, int child)
+{
+    auto source = coverage_tasks.find(parent);
+    if (source == coverage_tasks.end())
+        return E_NONE;
+    auto target = coverage_tasks.find(child);
+    if (target != coverage_tasks.end() && target->second != source->second)
+        return E_INVARG;
+    coverage_tasks[child] = source->second;
+    return E_NONE;
+}
+
+void
+coverage_task_finished(int id)
+{
+    auto task = coverage_tasks.find(id);
+    if (task == coverage_tasks.end())
+        return;
+    if (task->second->owner == id)
+        coverage_close(task->second.get());
+    else {
+        if (id == current_task_id)
+            coverage_active = nullptr;
+        coverage_tasks.erase(task);
+    }
+}
+
+void
+coverage_program_changed(Program *program)
+{
+    program->coverage_obsolete = true;
+    for (auto &task : coverage_tasks)
+        for (auto &entry : task.second->programs)
+            if (entry->program == program) {
+                entry->changed = true;
+                entry->bits.clear();
+            }
+}
+
+static void
+coverage_record(activation &a, int vector, unsigned pc, unsigned size)
+{
+    /* eval() has no defined verb to report. */
+    if (a.vloc.type != TYPE_OBJ || a.vloc.v.obj < 0)
+        return;
+    CoverageProgram *entry = coverage_active->last;
+    if (!entry || entry->program != a.prog || entry->name != a.verbname) {
+        entry = nullptr;
+        std::string key = "#" + std::to_string(a.vloc.v.obj) + ":" + a.verbname;
+        for (auto &candidate : coverage_active->programs) {
+            if (candidate->program == a.prog && candidate->key == key) {
+                entry = candidate.get();
+                break;
+            }
+        }
+        if (!entry) {
+            coverage_active->programs.emplace_back(new CoverageProgram(a, key));
+            entry = coverage_active->programs.back().get();
+        }
+        coverage_active->last = entry;
+    }
+    if (entry->changed || a.prog->coverage_obsolete) {
+        entry->changed = true;
+        return;
+    }
+    auto &bits = entry->bits[vector];
+    if (bits.empty())
+        bits.resize((size + 7) / 8);
+    bits[pc / 8] |= 1u << (pc % 8);
+}
+
+static package
+bf_coverage_start(Var arglist, Byte next, void *vdata, Objid progr)
+{
+    free_var(arglist);
+    if (!is_wizard(progr))
+        return make_error_pack(E_PERM);
+    if (coverage_tasks.count(current_task_id))
+        return make_error_pack(E_INVARG);
+    coverage_tasks[current_task_id] = std::make_shared<CoverageSession>(current_task_id);
+    coverage_select_task(current_task_id);
+    return no_var_pack();
+}
+
+static package
+bf_coverage_stop(Var arglist, Byte next, void *vdata, Objid progr)
+{
+    free_var(arglist);
+    if (!is_wizard(progr))
+        return make_error_pack(E_PERM);
+    auto task = coverage_tasks.find(current_task_id);
+    if (task == coverage_tasks.end())
+        return make_error_pack(E_INVARG);
+    auto session = task->second;
+    coverage_close(session.get());
+    std::map<std::string, std::set<unsigned>> lines;
+    for (auto &entry : session->programs) {
+        if (entry->changed) {
+            lines["!changed:" + entry->key];
+            continue;
+        }
+        auto &hits = lines[entry->key];
+        for (auto &vector : entry->bits) {
+            unsigned size = vector.first == MAIN_VECTOR ? entry->program->main_vector.size
+                : entry->program->fork_vectors[vector.first].size;
+            for (unsigned pc = 0; pc < size; ++pc)
+                if (vector.second[pc / 8] & (1u << (pc % 8)))
+                    hits.insert(find_line_number(entry->program, vector.first, pc));
+        }
+    }
+    Var result = new_map();
+    for (auto &entry : lines) {
+        Var hits = new_list(entry.second.size());
+        unsigned i = 0;
+        for (unsigned line : entry.second)
+            hits.v.list[++i] = Var::new_int(line);
+        result = mapinsert(result, str_dup_to_var(entry.first.c_str()), hits);
+    }
+    return make_var_pack(result);
+}
 
 /**** error handling ****/
 
@@ -972,6 +1140,9 @@ run(char raise, enum error resumption_error, Var * result)
     for (;;) {
 next_opcode:
         error_bv = bv;
+        if (coverage_active)
+            coverage_record(RUN_ACTIV, top_activ_stack == 0 ? root_activ_vector : MAIN_VECTOR,
+                            bv - bc.vector, bc.size);
         op = (Opcode)(*bv++);
 
         if (COUNT_TICK(op)) {
@@ -3127,7 +3298,11 @@ run_interpreter(char raise, enum error e,
 
     interpreter_is_running = 1;
     std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
+    coverage_select_task(current_task_id);
     ret = run(raise, e, result);
+    if (ret != OUTCOME_BLOCKED)
+        coverage_task_finished(current_task_id);
+    coverage_active = nullptr;
     std::chrono::duration<double> elapsed = std::chrono::high_resolution_clock::now() - start;
     total_cputime.v.fnum = elapsed.count();
     interpreter_is_running = 0;
@@ -3806,6 +3981,8 @@ register_execute(void)
     register_function("caller_perms", 0, 0, bf_caller_perms);
     register_function("callers", 0, 1, bf_callers, TYPE_ANY);
     register_function("task_stack", 1, 3, bf_task_stack, TYPE_INT, TYPE_ANY, TYPE_ANY);
+    register_function("coverage_start", 0, 0, bf_coverage_start);
+    register_function("coverage_stop", 0, 0, bf_coverage_stop);
 
 #ifdef WAIF_DICT
     waif_index_verb = str_dup(WAIF_INDEX_VERB);
