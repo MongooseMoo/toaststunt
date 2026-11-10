@@ -20,7 +20,7 @@ class TestCoverage < Test::Unit::TestCase
   end
 
   def assert_coverage(expected, statements)
-    actual = simplify(command(%Q|; #{statements}; c = coverage_stop(); return equal(c, #{value_ref(expected)}) || toliteral(c);|))
+    actual = simplify(command(%Q^; #{statements}; c = coverage_stop(); return equal(c, #{value_ref(expected)}) || toliteral(c);^))
     assert_equal 1, actual
   end
 
@@ -72,7 +72,7 @@ class TestCoverage < Test::Unit::TestCase
         'fork (0)', 'fork (0)', 'this:leaf();', 'endfork', 'endfork', 'return 1;'
       ])
       # Let all ready child work finish; no wall-clock delay.
-      result = simplify(command(%Q|; coverage_start(); #{o}:spawn(); suspend(0); suspend(0); c = coverage_stop(); return (equal(c["#{o}:leaf"], {1}) && 3 in c["#{o}:spawn"]) || toliteral(c);|))
+      result = simplify(command(%Q^; coverage_start(); #{o}:spawn(); suspend(0); suspend(0); c = coverage_stop(); return (equal(c["#{o}:leaf"], {1}) && 3 in c["#{o}:spawn"]) || toliteral(c);^))
       assert_equal 1, result
     end
   end
