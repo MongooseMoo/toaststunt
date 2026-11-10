@@ -15,7 +15,13 @@ with test_coverage.rb. PR #16 targets mongoose. Its initial add/add workflow
 conflict prevented CI from starting. Mongoose was merged into the feature for
 integration, retaining all existing checks and adding the coverage step. The
 original implementation commit remains directly based on upstream master.
-Pending CI and normal mongoose merge.
+The first CI native build and existing checks passed. Coverage assertions exposed
+two test-helper defects: using the full alias string instead of the returned verb
+index when setting code, and relying on the shared Ruby parser for singleton
+lists inside maps. define() now asserts successful verb creation and compiles by
+index. Coverage assertions use native equal() with the raw toliteral() on failure,
+following the existing AST suite. Added lifecycle and implicit-return regressions.
+Pending updated CI and normal mongoose merge.
 
 ## Decisions and why
 
