@@ -8,10 +8,10 @@ deployment or in-MOO framework changes are included.
 
 ## State
 
-Native implementation, documentation and Ruby wire regressions are written in
-an isolated master-based worktree. No local builds or tests have run. Verification
-uses the existing native PR CI workflow and disposable Test.db runner, extended
-with test_coverage.rb. PR #16 targets mongoose. Its initial add/add workflow
+Native implementation, documentation and Ruby wire regressions are complete.
+Verification uses the existing native PR CI workflow and disposable Test.db
+runner, extended with test_coverage.rb. No local builds or tests were used.
+PR #16 targets mongoose. Its initial add/add workflow
 conflict prevented CI from starting. Mongoose was merged into the feature for
 integration, retaining all existing checks and adding the coverage step. The
 original implementation commit remains directly based on upstream master.
@@ -28,7 +28,19 @@ rejected by a hard abort is not reported as executed. The implicit-return test
 remains an exact regression. Corrected resumed-suspend expectations to include
 the executing continuation on its original source line; the fork test now
 compares its complete expected map instead of treating MOO's membership index as
-a Boolean. Pending final CI and normal mongoose merge.
+a Boolean.
+
+The native build, actionlint/zizmor, existing connection/player/incarnation/JSON
+checks and the coverage suite passed in hosted PR CI run 42910220939. Native
+assertions verify exact branch maps, alias/inherited definitions, sorted unique
+hits, fork vectors and descendants, explicit resume, unrelated task exclusion,
+recompilation (including suspended old activations), permissions/session errors,
+owner completion/kill cleanup, implicit returns, independent recordings and
+identical MOO ticks with recording off and on. The new suite completes below the
+two-second requirement. No claim of measured CPU overhead is made.
+
+PR #16 is the authoritative integration/merge record:
+https://github.com/MongooseMoo/toaststunt/pull/16
 
 ## Decisions and why
 
@@ -70,6 +82,6 @@ worktrees also contain unrelated work; none may be cleaned up for this task.
 
 ## Next step
 
-Inspect the complete diff, publish the scoped feature for PR CI against mongoose,
-repair failures, verify the final tested integration, merge normally, push and
-remove only this task's worktree and feature branch. Do not restart production.
+No additional implementation is planned. Delivery ends with the normal mongoose
+merge and cleanup of this task's temporary branch/worktree. Production deployment
+and the in-MOO consumer/framework remain separate work.
