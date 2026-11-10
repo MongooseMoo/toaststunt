@@ -30,6 +30,7 @@ new_program(void)
     Program *p = (Program *) mymalloc(sizeof(Program), M_PROGRAM);
 
     p->ref_count = 1;
+    p->coverage_obsolete = false;
     p->first_lineno = 1;
     p->cached_lineno = 1;
     p->cached_lineno_pc = 0;

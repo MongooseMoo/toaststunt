@@ -31,6 +31,7 @@
 #include "db.h"
 #include "db_private.h"
 #include "db_tune.h"
+#include "execute.h"
 #include "list.h"
 #include "log.h"
 #include "parse_cmd.h"
@@ -875,8 +876,10 @@ db_set_verb_program(db_verb_handle vh, Program * program)
     handle *h = (handle *) vh.ptr;
 
     if (h) {
-        if (h->verbdef->program)
+        if (h->verbdef->program) {
+            coverage_program_changed(h->verbdef->program);
             free_program(h->verbdef->program);
+        }
         h->verbdef->program = program;
     } else
         panic_moo("DB_SET_VERB_PROGRAM: Null handle!");

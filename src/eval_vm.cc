@@ -47,6 +47,9 @@ free_vm(vm the_vm, int stack_too)
 {
     int i;
 
+    if (stack_too)
+        coverage_task_finished(the_vm->task_id);
+
     free_var(the_vm->local);
 
     if (stack_too)
