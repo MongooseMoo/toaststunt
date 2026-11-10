@@ -65,6 +65,12 @@ class TestCoverage < Test::Unit::TestCase
     end
   end
 
+  def test_existing_builtins_at_the_end_of_registration_are_preserved
+    run_test_as('wizard') do
+      assert_equal 'validate_ast', evaluate('function_info("validate_ast")[1]')
+    end
+  end
+
   def test_fork_vectors_and_grandchildren_are_included
     with_fixture do |o|
       define(o, 'leaf', ['return 123;'])
