@@ -72,8 +72,8 @@ class TestCoverage < Test::Unit::TestCase
         'fork (0)', 'fork (0)', 'this:leaf();', 'endfork', 'endfork', 'return 1;'
       ])
       # Let all ready child work finish; no wall-clock delay.
-      result = simplify(command(%Q^; coverage_start(); #{o}:spawn(); suspend(0); suspend(0); c = coverage_stop(); return (equal(c["#{o}:leaf"], {1}) && 3 in c["#{o}:spawn"]) || toliteral(c);^))
-      assert_equal 1, result
+      assert_record({"#{o}:leaf" => [1], "#{o}:spawn" => [1, 2, 3, 6]},
+        "#{o}:spawn(); suspend(0); suspend(0)")
     end
   end
 
@@ -94,7 +94,8 @@ class TestCoverage < Test::Unit::TestCase
       define(o, 'leaf', ['return 123;'])
       define(o, 'waiter', ['suspend();', 'this:leaf();', 'return 0;'])
       # Create and suspend the child before coverage starts.
-      assert_coverage({"#{o}:leaf" => [1], "#{o}:waiter" => [2, 3]},
+      # The continuation after suspend() still executes opcodes on line 1.
+      assert_coverage({"#{o}:leaf" => [1], "#{o}:waiter" => [1, 2, 3]},
         "fork id (0) #{o}:waiter(); endfork suspend(0); coverage_start(); resume(id); suspend(0)")
     end
   end

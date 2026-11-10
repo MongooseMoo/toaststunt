@@ -191,6 +191,9 @@ coverage_program_changed(Program *program)
 static void
 coverage_record(activation &a, int vector, unsigned pc, unsigned size)
 {
+    /* The final OP_DONE is synthetic and maps past verb_code()'s last line. */
+    if (pc == size - 1)
+        return;
     /* eval() has no defined verb to report. */
     if (a.vloc.type != TYPE_OBJ || a.vloc.v.obj < 0)
         return;
@@ -1140,9 +1143,6 @@ run(char raise, enum error resumption_error, Var * result)
     for (;;) {
 next_opcode:
         error_bv = bv;
-        if (coverage_active)
-            coverage_record(RUN_ACTIV, top_activ_stack == 0 ? root_activ_vector : MAIN_VECTOR,
-                            bv - bc.vector, bc.size);
         op = (Opcode)(*bv++);
 
         if (COUNT_TICK(op)) {
@@ -1157,6 +1157,9 @@ next_opcode:
                 return OUTCOME_ABORTED;
             }
         }
+        if (coverage_active)
+            coverage_record(RUN_ACTIV, top_activ_stack == 0 ? root_activ_vector : MAIN_VECTOR,
+                            error_bv - bc.vector, bc.size);
         switch (op) {
 
             case OP_IF_QUES:

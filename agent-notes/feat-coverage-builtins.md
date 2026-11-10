@@ -21,7 +21,14 @@ index when setting code, and relying on the shared Ruby parser for singleton
 lists inside maps. define() now asserts successful verb creation and compiles by
 index. Coverage assertions use native equal() with the raw toliteral() on failure,
 following the existing AST suite. Added lifecycle and implicit-return regressions.
-Pending updated CI and normal mongoose merge.
+Native equal() assertions subsequently exposed the synthetic final OP_DONE being
+reported as a line beyond verb_code(). The recorder now excludes that opcode
+before creating an entry. It records after execution-limit checks so an opcode
+rejected by a hard abort is not reported as executed. The implicit-return test
+remains an exact regression. Corrected resumed-suspend expectations to include
+the executing continuation on its original source line; the fork test now
+compares its complete expected map instead of treating MOO's membership index as
+a Boolean. Pending final CI and normal mongoose merge.
 
 ## Decisions and why
 
