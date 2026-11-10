@@ -491,6 +491,16 @@
 */
 /* #define ONLY_32_BITS */
 
+/****************************************************************************** 
+ * This option controls whether or not numbers are automatically promoted if
+ * dealing with both an int and a float. If enabled, the int will be promoted to
+ * a float before the operation is performed. If disabled, the operation will
+ * default to previous behavior, resulting in an error.
+ ******************************************************************************
+*/
+
+#define PROMOTE_NUMBERS
+
 /******************************************************************************
  * The Argon2 functions can be threaded for performance reasons, but there is a
  * significant caveat to be aware of: do_login_command cannot be suspended.

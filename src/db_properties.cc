@@ -232,6 +232,7 @@ db_add_propdef(Var obj, const char *pname, Var value, Objid owner,
 
     pval.var = value;
     pval.owner = owner;
+    db_note_owner(owner);
     pval.perms = flags;
 
     /* anonymous objects can't have children */
@@ -735,6 +736,7 @@ db_set_property_owner(db_prop_handle h, Objid oid)
         Pval *prop = (Pval *)h.ptr;
 
         prop->owner = oid;
+        db_note_owner(oid);
     }
 }
 

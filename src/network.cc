@@ -382,8 +382,8 @@ push_output(nhandle * h)
     return 1;
 }
 
-int 
-process_telnet_byte(nhandle *h, Stream *input_stream, Stream *oob_stream, unsigned char c) 
+int
+process_telnet_byte(nhandle *h, Stream *input_stream, Stream *oob_stream, unsigned char c)
 {
     #define TN_IAC  255
     #define TN_DO   253
@@ -393,7 +393,7 @@ process_telnet_byte(nhandle *h, Stream *input_stream, Stream *oob_stream, unsign
     #define TN_SE   240
     #define TN_SB   250
         if (stream_length(h->command_stream) >= MAX_LINE_BYTES) {
-        errlog("Connection `%s` exceeded MAX_LINE_BYTES in telnet command! (%" PRIdN " /%" PRIdN ")\n", 
+        errlog("Connection `%s` exceeded MAX_LINE_BYTES in telnet command! (%" PRIdN " /%" PRIdN ")\n",
                h->name, stream_length(h->command_stream), MAX_LINE_BYTES);
         return 0;  // Signal connection should be closed
     }
@@ -405,7 +405,7 @@ process_telnet_byte(nhandle *h, Stream *input_stream, Stream *oob_stream, unsign
                 reset_stream(h->command_stream);
                 stream_add_char(h->command_stream, c);
             } else {
-                if (isgraph(c) || c == ' ' || c == '\t')
+                if (isgraph(c) || c == ' ' || c == '\t' || (c >= 128 && c <= 254))
                     stream_add_char(input_stream, c);
 #ifdef INPUT_APPLY_BACKSPACE
                 else if (c == 0x08 || c == 0x7F)
@@ -420,6 +420,11 @@ process_telnet_byte(nhandle *h, Stream *input_stream, Stream *oob_stream, unsign
         case TELNET_STATE_IAC:
             stream_add_char(h->command_stream, c);
             if (c == TN_IAC) {
+                if (h->telnet_state == TELNET_STATE_SUBNEG) {
+                    stream_add_char(h->command_stream, c);
+                } else {
+                    stream_add_char(input_stream, c);
+                }
                 h->telnet_state = TELNET_STATE_NORMAL;
             } else {
                 h->telnet_cmd = c;
@@ -428,7 +433,7 @@ process_telnet_byte(nhandle *h, Stream *input_stream, Stream *oob_stream, unsign
                 } else if (c == TN_WILL || c == TN_WONT || c == TN_DO || c == TN_DONT) {
                     h->telnet_state = TELNET_STATE_COMMAND;
                 } else {
-                    stream_add_raw_bytes_to_binary(oob_stream, 
+                    stream_add_raw_bytes_to_binary(oob_stream,
                         stream_contents(h->command_stream),
                         stream_length(h->command_stream));
                     h->telnet_state = TELNET_STATE_NORMAL;

@@ -11,7 +11,11 @@ deployment or in-MOO framework changes are included.
 Native implementation, documentation and Ruby wire regressions are written in
 an isolated master-based worktree. No local builds or tests have run. Verification
 uses the existing native PR CI workflow and disposable Test.db runner, extended
-with test_coverage.rb. Pending source inspection, CI and normal mongoose merge.
+with test_coverage.rb. PR #16 targets mongoose. Its initial add/add workflow
+conflict prevented CI from starting. Mongoose was merged into the feature for
+integration, retaining all existing checks and adding the coverage step. The
+original implementation commit remains directly based on upstream master.
+Pending CI and normal mongoose merge.
 
 ## Decisions and why
 

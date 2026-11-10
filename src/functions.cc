@@ -74,7 +74,8 @@ static registry bi_function_registries[] =
     register_simplexnoise,
     register_argon2,
     register_spellcheck,
-    register_curl
+    register_curl,
+    register_ast
 };
 
 void
@@ -198,6 +199,19 @@ number_func_by_name(const char *name)
 /*** calling built-in functions ***/
 
 package
+make_arg_type_error_pack(const char *function, int position,
+                         var_type expected, var_type actual)
+{
+    static Stream *message = nullptr;
+    if (message == nullptr)
+        message = new_stream(20);
+    stream_printf(message, "%s (args[%i] of %s() expected %s; got %s)",
+                  unparse_error(E_TYPE), position, function,
+                  parse_type(expected), parse_type(actual));
+    return make_raise_pack(E_TYPE, reset_stream(message), var_ref(zero));
+}
+
+package
 call_bi_func(unsigned n, Var arglist, Byte func_pc,
              Objid progr, void *vdata)
 /* requires arglist.type == TYPE_LIST
@@ -268,10 +282,7 @@ call_bi_func(unsigned n, Var arglist, Byte func_pc,
                     || proto == arg)) {
                 free_var(arglist);
 
-                stream_printf(error_msg, "%s (args[%i] of %s() expected %s; got %s)",
-                              unparse_error(E_TYPE), k + 1, f->name, parse_type(proto), parse_type(arg));
-
-                return make_raise_pack(E_TYPE, reset_stream(error_msg), var_ref(zero));
+                return make_arg_type_error_pack(f->name, k + 1, proto, arg);
             }
         }
     } else if (func_pc == 2 && vdata == &call_bi_func) {

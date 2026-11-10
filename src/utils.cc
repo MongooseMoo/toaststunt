@@ -445,6 +445,8 @@ compare(Var lhs, Var rhs, int case_matters)
                 panic_moo("COMPARE: Invalid value type");
         }
     }
+    // Map keys retain their types. Numeric promotion here would also conflict
+    // with the type ordering of object/error keys and break transitivity.
     return lhs.type - rhs.type;
 }
 
@@ -490,12 +492,17 @@ equality(Var lhs, Var rhs, int case_matters)
                 panic_moo("EQUALITY: Unknown value type");
         }
     } else {
-        if (lhs.type == TYPE_BOOL && rhs.type == TYPE_INT) {
+                if (lhs.type == TYPE_BOOL && rhs.type == TYPE_INT) {
             return rhs.v.num == lhs.v.truth;
         }
         else         if (rhs.type == TYPE_BOOL && lhs.type == TYPE_INT) {
             return lhs.v.num == rhs.v.truth;
         }
+
+        else if ((lhs.type == TYPE_FLOAT || rhs.type == TYPE_FLOAT) &&
+            (lhs.type == TYPE_INT || rhs.type == TYPE_INT))
+                return (lhs.type == TYPE_FLOAT ? lhs.v.fnum : lhs.v.num) ==
+                       (rhs.type == TYPE_FLOAT ? rhs.v.fnum : rhs.v.num);
     }
     return 0;
 }
@@ -677,14 +684,20 @@ clean_to_raw_bytes(const char *buffer, int *buflen)
 }
 
 void
-stream_add_raw_bytes_to_binary(Stream *s, const char *buffer, int buflen)
+stream_add_raw_bytes_to_binary(Stream *s, const char *buffer, int buflen, bool allow_extended)
 {
     int i;
+    bool should_escape;
 
     for (i = 0; i < buflen; i++) {
         unsigned char c = buffer[i];
 
-        if (c != '~' && (isgraph(c) || c == ' '))
+        if (allow_extended) {
+            should_escape = (c != '~' && (isgraph(c) || c == ' ' || (c >= 128 && c <= 254)));
+        } else {
+            should_escape = (c != '~' && (isgraph(c) || c == ' '));
+        }
+        if (should_escape)
             stream_add_char(s, c);
         else
             stream_printf(s, "~%02X", (int) c);
@@ -692,14 +705,14 @@ stream_add_raw_bytes_to_binary(Stream *s, const char *buffer, int buflen)
 }
 
 const char *
-raw_bytes_to_binary(const char *buffer, int buflen)
+raw_bytes_to_binary(const char *buffer, int buflen, bool allow_extended)
 {
     static Stream *s = nullptr;
 
     if (!s)
         s = new_stream(100);
 
-    stream_add_raw_bytes_to_binary(s, buffer, buflen);
+    stream_add_raw_bytes_to_binary(s, buffer, buflen, allow_extended);
 
     return reset_stream(s);
 }

@@ -32,6 +32,7 @@
 
 #include <fcntl.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -66,6 +67,8 @@ typedef struct task_waiting_on_exec {
     const char *in;
     const char **env;
     int len;
+    int written;
+    bool input_error;
     pid_t pid;
     task_waiting_status status;
     int code;
@@ -85,8 +88,16 @@ static sigset_t block_sigchld;
 
 static Stream *logmsg = new_stream(30);
 
-#define BLOCK_SIGCHLD sigprocmask(SIG_BLOCK, &block_sigchld, NULL)
-#define UNBLOCK_SIGCHLD sigprocmask(SIG_UNBLOCK, &block_sigchld, NULL)
+/* These keep the SIGCHLD handler out while the main thread reads or
+ * changes `process_table'.  The server has other threads, so the mask
+ * is set with pthread_sigmask(); sigprocmask() is unspecified in a
+ * multithreaded process.  The other threads are started with SIGCHLD
+ * blocked (see init_pool_without_sigchld() in background.cc), so the
+ * main thread is the only one that ever runs the handler, and blocking
+ * the signal here really does exclude it.
+ */
+#define BLOCK_SIGCHLD pthread_sigmask(SIG_BLOCK, &block_sigchld, NULL)
+#define UNBLOCK_SIGCHLD pthread_sigmask(SIG_UNBLOCK, &block_sigchld, NULL)
 
 static task_waiting_on_exec *
 malloc_task_waiting_on_exec()
@@ -97,11 +108,33 @@ malloc_task_waiting_on_exec()
     tw->args = nullptr;
     tw->in = nullptr;
     tw->env = nullptr;
+    tw->len = 0;
+    tw->written = 0;
+    tw->input_error = false;
+    /* No child yet: a pid of 0 matches no reaped child in
+     * exec_complete(), and -1 marks a descriptor that was never opened
+     * so that free_task_waiting_on_exec() leaves it alone.
+     */
+    tw->pid = 0;
+    tw->fin = -1;
+    tw->fout = -1;
+    tw->ferr = -1;
+    tw->the_vm = nullptr;
     tw->status = TWS_CONTINUE;
     tw->code = 0;
     tw->sout = new_stream(1000);
     tw->serr = new_stream(1000);
     return tw;
+}
+
+static void
+close_stdin(task_waiting_on_exec *tw)
+{
+    if (tw->fin >= 0) {
+        network_unregister_fd(tw->fin);
+        close(tw->fin);
+        tw->fin = -1;
+    }
 }
 
 static void
@@ -123,10 +156,18 @@ free_task_waiting_on_exec(task_waiting_on_exec * tw)
     }
     if (tw->in)
         free_str(tw->in);
-    close(tw->fout);
-    close(tw->ferr);
-    network_unregister_fd(tw->fout);
-    network_unregister_fd(tw->ferr);
+    /* Stop the network loop watching each pipe before closing it: once
+     * closed, the descriptor number can be handed to a new connection.
+     */
+    close_stdin(tw);
+    if (tw->fout >= 0) {
+        network_unregister_fd(tw->fout);
+        close(tw->fout);
+    }
+    if (tw->ferr >= 0) {
+        network_unregister_fd(tw->ferr);
+        close(tw->ferr);
+    }
     if (tw->sout)
         free_stream(tw->sout);
     if (tw->serr)
@@ -161,40 +202,69 @@ exec_waiter_enumerator(task_closure closure, void *data)
     return action;
 }
 
-static int
-write_all(int fd, const char *buffer, size_t length)
+static void
+stdin_writable(int fd, void *data)
 {
-    ssize_t count;
-    while (length) {
-        if ((count = write(fd, buffer, length)) < 0)
-            return -1;
-        buffer += count;
-        length -= count;
+    task_waiting_on_exec *tw = (task_waiting_on_exec *)data;
+    while (tw->written < tw->len) {
+        ssize_t count = write(fd, tw->in + tw->written, tw->len - tw->written);
+        if (count > 0) {
+            tw->written += count;
+        } else if (count < 0 && errno == EINTR) {
+            continue;
+        } else if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return;
+        } else {
+            /* Resume through the normal exec completion owner, outside
+             * the network callback. A real write failure remains E_EXEC.
+             */
+            BLOCK_SIGCHLD;
+            tw->input_error = true;
+            if (tw->status == TWS_CONTINUE)
+                tw->status = TWS_STOP;
+            sigchild_interrupt = 1;
+            UNBLOCK_SIGCHLD;
+            break;
+        }
     }
-    fsync(fd);
-    return 1;
+    close_stdin(tw);
+}
+
+/* Move whatever the child has written to `fd' into `stream'.
+ *
+ * A read of 0 bytes is end-of-file: the child has closed its end and
+ * there will never be more.  A pipe at end-of-file is always "readable",
+ * so the network loop must stop watching it, or its poll returns at once
+ * for ever and the server spins.  The descriptor itself stays open until
+ * free_task_waiting_on_exec() closes it.
+ */
+static void
+drain_pipe(int fd, Stream *stream)
+{
+    char buffer[1000];
+    ssize_t n;
+
+    while ((n = read(fd, buffer, sizeof(buffer))) > 0)
+        stream_add_string(stream, raw_bytes_to_binary(buffer, n, true));
+
+    if (n == 0)
+        network_unregister_fd(fd);
 }
 
 static void
 stdout_readable(int fd, void *data)
 {
     task_waiting_on_exec *tw = (task_waiting_on_exec *)data;
-    char buffer[1000];
-    int n;
-    while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
-        stream_add_string(tw->sout, raw_bytes_to_binary(buffer, n));
-    }
+
+    drain_pipe(fd, tw->sout);
 }
 
 static void
 stderr_readable(int fd, void *data)
 {
     task_waiting_on_exec *tw = (task_waiting_on_exec *)data;
-    char buffer[1000];
-    int n;
-    while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
-        stream_add_string(tw->serr, raw_bytes_to_binary(buffer, n));
-    }
+
+    drain_pipe(fd, tw->serr);
 }
 
 static pid_t
@@ -205,6 +275,8 @@ fork_and_exec(const char *cmd, const char *const args[], const char *const env[]
     int pipeIn[2];
     int pipeOut[2];
     int pipeErr[2];
+    posix_spawn_file_actions_t actions;
+    int status;
 
     if (pipe(pipeIn) < 0) {
         log_perror("EXEC: Couldn't create pipe - in");
@@ -218,33 +290,38 @@ fork_and_exec(const char *cmd, const char *const args[], const char *const env[]
         log_perror("EXEC: Couldn't create pipe - err");
         goto close_out;
     }
-    else if ((pid = fork()) < 0) {
-        log_perror("EXEC: Couldn't fork");
+
+    /* Start the child with posix_spawn() rather than fork() + execve().
+     * fork() copies the page tables of the whole server, so its cost grows
+     * with the size of the database in memory and the server stalls for
+     * that long on every exec().  posix_spawn() does not copy them.
+     *
+     * In the child: the pipes become stdin, stdout and stderr, and the
+     * parent's ends are closed.
+     */
+    if ((status = posix_spawn_file_actions_init(&actions)) != 0) {
+        errno = status;
+        log_perror("EXEC: Couldn't set up spawn");
         goto close_err;
     }
-    else if (0 == pid) { /* child */
-        int status;
+    if ((status = posix_spawn_file_actions_adddup2(&actions, pipeIn[0], STDIN_FILENO)) != 0
+            || (status = posix_spawn_file_actions_adddup2(&actions, pipeOut[1], STDOUT_FILENO)) != 0
+            || (status = posix_spawn_file_actions_adddup2(&actions, pipeErr[1], STDERR_FILENO)) != 0
+            || (status = posix_spawn_file_actions_addclose(&actions, pipeIn[1])) != 0
+            || (status = posix_spawn_file_actions_addclose(&actions, pipeOut[0])) != 0
+            || (status = posix_spawn_file_actions_addclose(&actions, pipeErr[0])) != 0) {
+        errno = status;
+        log_perror("EXEC: Couldn't set up spawn");
+        posix_spawn_file_actions_destroy(&actions);
+        goto close_err;
+    }
 
-        if ((status = dup2(pipeIn[0], STDIN_FILENO)) < 0) {
-            perror("dup2");
-            exit(status);
-        }
-        if ((status = dup2(pipeOut[1], STDOUT_FILENO)) < 0) {
-            perror("dup2");
-            exit(status);
-        }
-        if ((status = dup2(pipeErr[1], STDERR_FILENO)) < 0) {
-            perror("dup2");
-            exit(status);
-        }
-
-        close(pipeIn[1]);
-        close(pipeOut[0]);
-        close(pipeErr[0]);
-
-        status = execve(cmd, (char *const *)args, (char *const *)env);
-        perror("execve");
-        exit(status);
+    status = posix_spawn(&pid, cmd, &actions, nullptr, (char *const *)args, (char *const *)env);
+    posix_spawn_file_actions_destroy(&actions);
+    if (status != 0) {
+        errno = status;
+        log_perror("EXEC: Couldn't spawn");
+        goto close_err;
     }
 
     close(pipeIn[0]);
@@ -317,18 +394,16 @@ exec_waiter_suspender(vm the_vm, void *data)
 
     oklog("%s\n", reset_stream(logmsg));
 
-    set_nonblocking(tw->fin);
-    set_nonblocking(tw->fout);
-    set_nonblocking(tw->ferr);
-
-    if (tw->in) {
-        if (write_all(tw->fin, tw->in, tw->len) < 0) {
-            error = E_EXEC;
-            goto close_fin;
-        }
+    if (!set_nonblocking(tw->fin) || !set_nonblocking(tw->fout)
+            || !set_nonblocking(tw->ferr)) {
+        error = E_EXEC;
+        goto clear_process_slot;
     }
 
-    close(tw->fin);
+    if (tw->len)
+        network_register_fd(tw->fin, nullptr, stdin_writable, tw);
+    else
+        close_stdin(tw);
 
     network_register_fd(tw->fout, stdout_readable, nullptr, tw);
     network_register_fd(tw->ferr, stderr_readable, nullptr, tw);
@@ -338,9 +413,6 @@ exec_waiter_suspender(vm the_vm, void *data)
     /* success */
     UNBLOCK_SIGCHLD;
     return E_NONE;
-
-close_fin:
-    close(tw->fin);
 
 clear_process_slot:
     process_table[i] = nullptr;
@@ -553,16 +625,20 @@ deal_with_child_exit(void)
         tw = process_table[i];
         if (tw && TWS_STOP == tw->status) {
             Var v;
-            v = new_list(3);
-            v.v.list[1].type = TYPE_INT;
-            v.v.list[1].v.num = tw->code;
-            stdout_readable(tw->fout, tw);
-            v.v.list[2].type = TYPE_STR;
-            v.v.list[2].v.str = str_dup(reset_stream(tw->sout));
-            stderr_readable(tw->ferr, tw);
-            v.v.list[3].type = TYPE_STR;
-            v.v.list[3].v.str = str_dup(reset_stream(tw->serr));
-
+            if (tw->input_error || tw->written < tw->len) {
+                v.type = TYPE_ERR;
+                v.v.err = E_EXEC;
+            } else {
+                v = new_list(3);
+                v.v.list[1].type = TYPE_INT;
+                v.v.list[1].v.num = tw->code;
+                stdout_readable(tw->fout, tw);
+                v.v.list[2].type = TYPE_STR;
+                v.v.list[2].v.str = str_dup(reset_stream(tw->sout));
+                stderr_readable(tw->ferr, tw);
+                v.v.list[3].type = TYPE_STR;
+                v.v.list[3].v.str = str_dup(reset_stream(tw->serr));
+            }
             resume_task(tw->the_vm, v);
         }
         if (tw && TWS_CONTINUE != tw->status) {

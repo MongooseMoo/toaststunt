@@ -174,6 +174,44 @@ class TestJson < Test::Unit::TestCase
     end
   end
 
+  def test_that_array_parsing_preserves_nested_values_and_sibling_order
+    run_test_as('wizard') do
+      source = '[[],[1],{},["First",{"key":[2,3]},"Last"],null,1.5]'
+      expected = '[[],[1],{},["First",{"key":[2,3]},"Last"],"E_NONE",1.5]'
+      [nil, 'common-subset', 'embedded-types'].each do |mode|
+        # Compare serialized output so singleton lists and native ERR values
+        # cannot be flattened or coerced by the Ruby response parser.
+        suffix = mode.nil? ? '' : ", \"#{mode}\""
+        assert_equal expected, simplify(command(%Q|; return generate_json(parse_json(#{value_ref(source.gsub('"', '\\"'))}#{suffix}));|))
+        assert_equal [1, 1, 1, 1], simplify(command(%Q|; a = parse_json("[true,false]"#{suffix}); return {typeof(a[1]) == BOOL, typeof(a[2]) == BOOL, a[1] == true, a[2] == false};|))
+      end
+      source = '["#13|obj","E_PERM|err","1|int","2.5|float","true|bool","Name|str"]'
+      expected = '["#13|obj","E_PERM|err",1,2.5,true,"Name"]'
+      assert_equal expected, simplify(command(%Q|; return generate_json(parse_json(#{value_ref(source.gsub('"', '\\"'))}, "embedded-types"), "embedded-types");|))
+      assert_equal ['#13|obj', 'E_PERM|err', '1|int', '2.5|float', 'true|bool', 'Name|str'], parse_json(source.gsub('"', '\\"'), 'common-subset')
+    end
+  end
+
+  def test_that_large_array_parsing_retains_every_element_in_order
+    run_test_as('programmer') do
+      expected = (0...2048).to_a
+      assert_equal expected, parse_json('[' + expected.join(',') + ']')
+    end
+  end
+
+  def test_that_errors_after_completed_arrays_do_not_corrupt_later_parses
+    run_test_as('programmer') do
+      [nil, 'common-subset', 'embedded-types'].each do |mode|
+        ['[[1,2],{"key":["First","Last"]},]',
+         '{"key":[[],{"nested":[1,2]}],"bad":}',
+         '[[1,2],[[3,4]]'].each do |source|
+          assert_equal E_INVARG, parse_json(source.gsub('"', '\\"'), mode)
+        end
+        assert_equal [5, 6, 7], parse_json('[5,6,7]', mode)
+      end
+    end
+  end
+
   def test_that_parsing_a_very_long_json_string_does_not_overflow_the_stack
     run_test_as('programmer') do
       # Build the input in-MOO so the test protocol and Ruby parser do not
@@ -404,6 +442,34 @@ class TestJson < Test::Unit::TestCase
   def test_that_json_generated_from_a_float_is_represented_as_a_float
     run_test_as('programmer') do
       assert_equal "1.0", generate_json(1.0)
+    end
+  end
+
+  def test_that_parse_json_returns_detailed_syntax_error
+    run_test_as('wizard') do
+      info = capture_error_info('parse_json("[1, 2, ]")')
+      assert_equal E_INVARG, info[0]
+      assert info[1].is_a?(String), "Error message should be a string"
+      assert info[1].length > 10, "Error message should be meaningful"
+      # YAJL errors look like: "parse error: after array element, I expect..."
+    end
+  end
+
+  def test_that_parse_json_returns_byte_offset_in_error_value
+    run_test_as('wizard') do
+      info = capture_error_info('parse_json("[1, 2, ]")')
+      assert_equal E_INVARG, info[0]
+      assert info[2].is_a?(Integer), "Error value should be byte offset"
+      assert info[2] >= 0
+    end
+  end
+
+  def test_that_parse_json_error_for_invalid_json_includes_position
+    run_test_as('wizard') do
+      info = capture_error_info('parse_json("{\"a\": }")')
+      assert_equal E_INVARG, info[0]
+      # Verbose YAJL errors include the problematic text
+      assert info[1].include?('{') || info[1].include?('parse error')
     end
   end
 

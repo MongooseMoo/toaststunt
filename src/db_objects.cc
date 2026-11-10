@@ -24,6 +24,7 @@
 #include <unordered_set>
 #include <vector>
 #include <algorithm>
+#include <climits>
 
 #include <ctime>
 #include "config.h"
@@ -40,6 +41,7 @@
 #include "map.h"
 #include "options.h"
 #include "log.h"
+#include "waif.h"
 
 static Object **objects;
 static Num num_objects = 0;
@@ -51,6 +53,10 @@ static Num max_objects = 0;
  * anons, complicating refcounts, and  messing with filtering functions
  * like children(), we just keep track of them here. */
 static std::unordered_map<Objid, std::unordered_set<Object*>> anonymous_objects;
+
+/* Owner numbers that named no object when they were stored. An object later
+ * created with one of these numbers starts out marked as an owner. */
+static std::unordered_set<Objid> unbound_owners;
 
 static Var all_users;
 
@@ -237,10 +243,51 @@ dbpriv_new_object(Num new_objid, bool anonymous)
 
     o = objects[new_objid] = (Object *)mymalloc(sizeof(Object), mem_type);
     o->id = new_objid;
+    o->anonymous_storage = anonymous;
+    o->is_owner = unbound_owners.erase(new_objid) > 0;
 
     o->waif_propdefs = nullptr;
 
     return o;
+}
+
+void
+db_note_owner(Objid owner)
+{
+    if (owner < 0)
+        return;
+    if (owner < num_objects && objects[owner] && !objects[owner]->anonymous_storage)
+        objects[owner]->is_owner = true;
+    else
+        unbound_owners.insert(owner);
+}
+
+static void
+note_owners_in(Object *o)
+{
+    db_note_owner(o->owner);
+    for (Verbdef *v = o->verbdefs; v; v = v->next)
+        db_note_owner(v->owner);
+    for (unsigned int i = 0; i < o->nval; i++)
+        db_note_owner(o->propval[i].owner);
+}
+
+void
+db_note_all_owners(void)
+{
+    for (Objid oid = 0; oid < num_objects; oid++)
+        if (objects[oid])
+            note_owners_in(objects[oid]);
+
+    for (const auto& x : anonymous_objects)
+        for (const auto& y : x.second)
+            note_owners_in(y);
+}
+
+bool
+db_object_is_owner(Objid oid)
+{
+    return objects[oid]->is_owner;
 }
 
 Object *
@@ -251,6 +298,8 @@ dbpriv_new_anonymous_object(void)
     ensure_new_object();
     o = objects[num_objects] = (Object *)mymalloc(sizeof(Object), M_ANON);
     o->id = NOTHING;
+    o->anonymous_storage = true;
+    o->is_owner = false;
     num_objects++;
 
     o->waif_propdefs = nullptr;
@@ -300,8 +349,21 @@ db_create_object(Num new_objid, bool anonymous)
 {
     Object *o;
 
-    if (new_objid <= 0 || new_objid > num_objects)
+    if (new_objid <= 0 || new_objid >= num_objects) {
+        /* extend() uses signed-int power-of-two capacities. Check its bound
+         * before incrementing Num or converting its argument to unsigned int.
+         * A trimmed high-water mark does not make a WAIF-owned/classed slot
+         * available: preserve it as a recycled hole and keep looking. */
+        constexpr Num last_append_slot = INT_MAX / 2 - 1;
+        while (true) {
+            if (num_objects > last_append_slot)
+                return NOTHING;
+            if (!waif_uses_object_slot(num_objects))
+                break;
+            dbpriv_new_recycled_object();
+        }
         new_objid = num_objects;
+    }
 
     o = dbpriv_new_object(new_objid, anonymous);
     db_init_object(o, anonymous);
@@ -430,6 +492,7 @@ db_make_anonymous(Objid oid, Objid last)
     db_set_last_used_objid(last);
 
     o->id = NOTHING;
+    o->anonymous_storage = true;
 
     free_var(o->children);
     free_var(o->location);
@@ -551,7 +614,7 @@ db_renumber_object(Objid old)
 #endif /* USE_ANCESTOR_CACHE */
 
     for (_new = 0; _new < old; _new++) {
-        if (objects[_new] == nullptr) {
+        if (objects[_new] == nullptr && !waif_uses_object_slot(_new)) {
             /* Change the identity of the object. */
             o = objects[_new] = objects[old];
             objects[old] = nullptr;
@@ -924,6 +987,7 @@ void
 dbpriv_set_object_owner(Object *o, Objid owner)
 {
     o->owner = owner;
+    db_note_owner(owner);
 }
 
 Objid

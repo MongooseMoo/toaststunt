@@ -18,6 +18,8 @@
 #include <ctype.h>
 #include <stdio.h>
 
+#include <cmath>
+
 #include "ast.h"
 #include "config.h"
 #include "decompile.h"
@@ -32,7 +34,7 @@
 #include "streams.h"
 #include "utils.h"
 
-static Program *prog;
+static const char **var_names;
 
 const char *
 unparse_error(enum error e)
@@ -348,11 +350,26 @@ list_prg(Stmt * program, int p, int i)
     unparse_stmt(program, 0);
 }
 
+/*
+ * A negative number is written with a leading `-', which the parser reads as
+ * unary minus, so as an operand it binds only as tightly as that does.
+ */
+static int
+operand_prec(Expr * expr)
+{
+    if (expr->kind == EXPR_VAR
+            && ((expr->e.var.type == TYPE_INT && expr->e.var.v.num < 0)
+                || (expr->e.var.type == TYPE_FLOAT
+                    && std::signbit(expr->e.var.v.fnum))))
+        return expr_prec[EXPR_NEGATE];
+    return expr_prec[expr->kind];
+}
+
 static void
 bracket_lt(Stream * str, enum Expr_Kind parent, Expr * child)
 {
     if ((fully_parenthesize && expr_prec[child->kind] < expr_prec[EXPR_PROP])
-            || expr_prec[parent] > expr_prec[child->kind]) {
+            || expr_prec[parent] > operand_prec(child)) {
         stream_add_char(str, '(');
         unparse_expr(str, child);
         stream_add_char(str, ')');
@@ -365,7 +382,7 @@ static void
 bracket_le(Stream * str, enum Expr_Kind parent, Expr * child)
 {
     if ((fully_parenthesize && expr_prec[child->kind] < expr_prec[EXPR_PROP])
-            || expr_prec[parent] >= expr_prec[child->kind]) {
+            || expr_prec[parent] >= operand_prec(child)) {
         stream_add_char(str, '(');
         unparse_expr(str, child);
         stream_add_char(str, ')');
@@ -423,9 +440,9 @@ static void
 unparse_stmt_list(Stream * str, struct Stmt_List list, int indent)
 {
     if (list.index > -1)
-        stream_printf(str, "for %s, %s in (", prog->var_names[list.id], prog->var_names[list.index]);
+        stream_printf(str, "for %s, %s in (", var_names[list.id], var_names[list.index]);
     else
-        stream_printf(str, "for %s in (", prog->var_names[list.id]);
+        stream_printf(str, "for %s in (", var_names[list.id]);
     unparse_expr(str, list.expr);
     stream_add_char(str, ')');
     output(str);
@@ -438,7 +455,7 @@ unparse_stmt_list(Stream * str, struct Stmt_List list, int indent)
 static void
 unparse_stmt_range(Stream * str, struct Stmt_Range range, int indent)
 {
-    stream_printf(str, "for %s in [", prog->var_names[range.id]);
+    stream_printf(str, "for %s in [", var_names[range.id]);
     unparse_expr(str, range.from);
     stream_add_string(str, "..");
     unparse_expr(str, range.to);
@@ -454,7 +471,7 @@ static void
 unparse_stmt_fork(Stream * str, struct Stmt_Fork fork_stmt, int indent)
 {
     if (fork_stmt.id >= 0)
-        stream_printf(str, "fork %s (", prog->var_names[fork_stmt.id]);
+        stream_printf(str, "fork %s (", var_names[fork_stmt.id]);
     else
         stream_add_string(str, "fork (");
     unparse_expr(str, fork_stmt.time);
@@ -478,7 +495,7 @@ unparse_stmt_catch(Stream * str, struct Stmt_Catch _catch, int indent)
         indent_stmt(str, indent);
         stream_add_string(str, "except ");
         if (ex->id >= 0)
-            stream_printf(str, "%s ", prog->var_names[ex->id]);
+            stream_printf(str, "%s ", var_names[ex->id]);
         stream_add_char(str, '(');
         if (ex->codes)
             unparse_arglist(str, ex->codes);
@@ -523,7 +540,7 @@ unparse_stmt(Stmt * stmt, int indent)
                     stream_add_string(str, "while (");
                 else
                     stream_printf(str, "while %s (",
-                                  prog->var_names[stmt->s.loop.id]);
+                                  var_names[stmt->s.loop.id]);
                 unparse_expr(str, stmt->s.loop.condition);
                 stream_add_char(str, ')');
                 output(str);
@@ -566,7 +583,7 @@ unparse_stmt(Stmt * stmt, int indent)
                     stream_printf(str, "%s;", kwd);
                 else
                     stream_printf(str, "%s %s;", kwd,
-                                  prog->var_names[stmt->s.exit]);
+                                  var_names[stmt->s.exit]);
                 output(str);
             }
             break;
@@ -582,7 +599,7 @@ unparse_stmt(Stmt * stmt, int indent)
     free_stream(str);
 }
 
-static int
+int
 ok_identifier(const char *name)
 {
     const char *p = name;
@@ -632,7 +649,8 @@ unparse_expr(Stream * str, Expr * expr)
             } else {
                 bracket_lt(str, EXPR_PROP, expr->e.bin.lhs);
                 if (expr->e.bin.lhs->kind == EXPR_VAR
-                        && expr->e.bin.lhs->e.var.type == TYPE_INT)
+                        && expr->e.bin.lhs->e.var.type == TYPE_INT
+                        && expr->e.bin.lhs->e.var.v.num >= 0)
                     /* avoid parsing digits followed by dot as floating-point */
                     stream_add_char(str, ' ');
                 stream_add_char(str, '.');
@@ -748,7 +766,7 @@ unparse_expr(Stream * str, Expr * expr)
             break;
 
         case EXPR_ID:
-            stream_add_string(str, prog->var_names[expr->e.id]);
+            stream_add_string(str, var_names[expr->e.id]);
             break;
 
         case EXPR_LIST:
@@ -835,10 +853,10 @@ unparse_scatter(Stream * str, Scatter * sc)
                 stream_add_char(str, '@');
             /* fall thru to ... */
             case SCAT_REQUIRED:
-                stream_add_string(str, prog->var_names[sc->id]);
+                stream_add_string(str, var_names[sc->id]);
                 break;
             case SCAT_OPTIONAL:
-                stream_printf(str, "?%s", prog->var_names[sc->id]);
+                stream_printf(str, "?%s", var_names[sc->id]);
                 if (sc->expr) {
                     stream_add_string(str, " = ");
                     unparse_expr(str, sc->expr);
@@ -851,15 +869,23 @@ unparse_scatter(Stream * str, Scatter * sc)
 }
 
 void
+unparse_stmts(Stmt * stmts, const char **names, Unparser_Receiver r,
+              void *data, int fully_parenthesize, int indent_lines)
+{
+    var_names = names;
+    receiver = r;
+    receiver_data = data;
+    list_prg(stmts, fully_parenthesize, indent_lines);
+}
+
+void
 unparse_program(Program * p, Unparser_Receiver r, void *data,
                 int fully_parenthesize, int indent_lines, int f_index)
 {
     Stmt *stmt = decompile_program(p, f_index);
 
-    prog = p;
-    receiver = r;
-    receiver_data = data;
-    list_prg(stmt, fully_parenthesize, indent_lines);
+    unparse_stmts(stmt, p->var_names, r, data, fully_parenthesize,
+                  indent_lines);
     free_stmt(stmt);
 }
 
