@@ -408,9 +408,15 @@ Var do_modulus(Var a, Var b)
         {
             if (a.type == TYPE_INT)
             {
-                const auto n = a.v.num;
-                const auto d = b.v.num;
-                const auto result = (n % d + d) % d;
+                const Num n = a.v.num;
+                const Num d = b.v.num;
+                /* Floored modulus (the result takes the sign of the divisor),
+                 * as in the non-PROMOTE_NUMBERS do_modulus. Avoid `n % -1',
+                 * which traps for the most negative integer, and `n % d + d',
+                 * which can overflow for large divisors. */
+                Num result = (d == -1) ? 0 : n % d;
+                if (result != 0 && ((result < 0) != (d < 0)))
+                    result += d;
                 ans.type = TYPE_INT;
                 ans.v.num = result;
             }
@@ -468,8 +474,12 @@ Var do_divide(Var a, Var b)
     else if (temp_a.type == TYPE_INT)
     {
         ans.type = TYPE_INT;
-        if (temp_a.v.num == MININT && temp_b.v.num == -1)
-            ans.v.num = MININT;
+        /* The most negative integer divided by -1 overflows (and traps).
+         * MININT is one above that value, so compare the divisor instead and
+         * negate in unsigned arithmetic so it wraps, as the
+         * non-PROMOTE_NUMBERS do_divide does. */
+        if (temp_b.v.num == -1)
+            ans.v.num = (Num) (0 - (UNum) temp_a.v.num);
         else
             ans.v.num = temp_a.v.num / temp_b.v.num;
     }
@@ -646,9 +656,14 @@ do_modulus(Var a, Var b)
     } else {
         if (a.type == TYPE_INT)
         {
-            const auto n = a.v.num;
-            const auto d = b.v.num;
-            const auto result = (n % d + d) % d;
+            const Num n = a.v.num;
+            const Num d = b.v.num;
+            /* Floored modulus (the result takes the sign of the divisor).
+             * Avoid `n % -1', which traps for the most negative integer, and
+             * `n % d + d', which can overflow for large divisors. */
+            Num result = (d == -1) ? 0 : n % d;
+            if (result != 0 && ((result < 0) != (d < 0)))
+                result += d;
             ans.type = TYPE_INT;
             ans.v.num = result;
         }
@@ -678,8 +693,10 @@ do_divide(Var a, Var b)
         ans.v.err = E_DIV;
     } else if (a.type == TYPE_INT) {
         ans.type = TYPE_INT;
-        if (a.v.num == MININT && b.v.num == -1)
-            ans.v.num = MININT;
+        /* The most negative integer divided by -1 overflows (and traps).
+         * Negate in unsigned arithmetic so it wraps, like other overflow. */
+        if (b.v.num == -1)
+            ans.v.num = (Num) (0 - (UNum) a.v.num);
         else
             ans.v.num = a.v.num / b.v.num;
     } else { // must be float

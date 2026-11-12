@@ -223,6 +223,7 @@ class TestMap < Test::Unit::TestCase
       assert_equal({1 => 2, 3 => 4}, mapdelete({1 => 2, 3 => 4}, []))
       assert_equal E_TYPE, mapdelete({1 => 2, 3 => 4}, {1 => 2})
       assert_equal({3 => 4}, mapdelete({1 => 2, 3 => 4}, [1]))
+      assert_equal E_RANGE, mapdelete({1 => 2, 3 => 4}, [1, 2])
     end
   end
 
