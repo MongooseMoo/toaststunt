@@ -255,16 +255,10 @@ bf_coverage_stop(Var arglist, Byte next, void *vdata, Objid progr)
         }
         auto &hits = lines[entry->key];
         for (auto &vector : entry->bits) {
-            unsigned size = vector.first == MAIN_VECTOR ? entry->program->main_vector.size
-                : entry->program->fork_vectors[vector.first].size;
-            for (unsigned pc = 0; pc < size; ++pc)
-                if (vector.second[pc / 8] & (1u << (pc % 8))) {
-                    /* Every executed PC is recorded, including ones the
-                     * traceback mapper was never asked about. */
-                    unsigned line = find_line_number_or_zero(entry->program, vector.first, pc);
-                    if (line)
-                        hits.insert(line);
-                }
+            /* One decompile per recorded vector, however many PCs it holds. */
+            std::vector<unsigned> found;
+            find_line_numbers(entry->program, vector.first, vector.second.data(), found);
+            hits.insert(found.begin(), found.end());
         }
     }
     Var result = new_map();

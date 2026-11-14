@@ -348,6 +348,23 @@ class TestCoverage < Test::Unit::TestCase
     end
   end
 
+  def test_a_loop_that_never_runs_does_not_report_its_body
+    with_fixture do |o|
+      define(o, 'empty', ['for v in ({})', 'x = 1;', 'endfor', 'for i, k in ([])', 'x = 2;', 'endfor', 'return 0;'])
+      assert_record({"#{o}:empty" => [1, 4, 7]}, "#{o}:empty()")
+    end
+  end
+
+  # Stop decompiles each recorded verb once: a long verb with every line
+  # executed many times must still map exactly.
+  def test_a_long_verb_maps_every_line_in_one_pass
+    with_fixture do |o|
+      body = (1..300).map { |i| "x = `{@x, #{i}}[$] ! ANY => 0';" }
+      define(o, 'long', ['x = {};', *body, 'return x;'])
+      assert_record({"#{o}:long" => (1..302).to_a}, "#{o}:long()")
+    end
+  end
+
   def test_recompiling_the_running_verb_then_stopping_inside_it
     with_fixture do |o|
       define(o, 'self', ['set_verb_code(this, "self", {"return 1;"});', 'x = 1;', 'return coverage_stop();'])

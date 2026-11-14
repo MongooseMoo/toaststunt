@@ -15,11 +15,17 @@
     Pavel@Xerox.Com
  *****************************************************************************/
 
+#include <vector>
+
 #include "ast.h"
 #include "program.h"
 
 extern Stmt *decompile_program(Program * program, int vector);
 extern unsigned find_line_number(Program * program, int vector, unsigned pc);
-/* For a PC that need not be one a traceback can name: 0 instead of a panic
- * when the PC belongs to no line. */
-extern unsigned find_line_number_or_zero(Program * program, int vector, unsigned pc);
+/* Appends to LINES the line of every PC whose bit is set in PC_BITS (one bit
+ * per byte of VECTOR), decompiling PROGRAM once.  The PCs need not be ones a
+ * traceback can name; a PC that belongs to no line adds nothing.  LINES may
+ * receive a line more than once. */
+extern void find_line_numbers(Program * program, int vector,
+                              const unsigned char *pc_bits,
+                              std::vector<unsigned> &lines);
