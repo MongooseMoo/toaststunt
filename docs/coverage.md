@@ -10,6 +10,12 @@ and asynchronous builtins preserve the recording through the existing task ID.
 Unrelated tasks are excluded. Resuming a task belonging to a different active
 recording raises `E_INVARG` before changing that task.
 
+A task may record any number of times, one recording after another: once stop
+has returned, start may be called again, in the same verb or in any verb the
+task calls or returns to. Starting, stopping, suspending, forking, killing
+tasks and recompiling verbs in any order never stops the server; the only
+errors are the `E_INVARG` cases above.
+
 Stop ends the entire recording, detaches its tasks, and returns a map:
 
 ```moo
@@ -39,5 +45,7 @@ not awaited or killed.
 
 The disabled opcode path checks one pointer and does not change MOO tick
 accounting. Recording sets bits for program/vector/PC; only stop maps PCs to
-lines using the existing traceback mapper. Stop's conversion uses CPU time,
+lines, with `find_line_number_or_zero()`: the traceback mapper's lookup, which
+leaves out a PC that belongs to no line where `find_line_number()` would panic.
+Stop's conversion uses CPU time,
 and large recordings can be expensive because that mapper decompiles programs.
