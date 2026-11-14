@@ -451,9 +451,11 @@ finish_indexed_assignment:
             asgn_hot = 0;
             while (*ptr != OP_PUSH_TEMP) {
                 if (ptr == hot_byte)    /* it's our assignment expression */
-                    hot_node = expr_stack[top_expr_stack];
+                    hot_node = expr_stack[top_expr_stack - 1];
                 ptr++;
             }
+            if (ptr == hot_byte)    /* the closing PUSH_TEMP is part of it too */
+                hot_node = expr_stack[top_expr_stack - 1];
             ptr++;
             break;
             case OP_G_PUT:
@@ -491,7 +493,7 @@ finish_indexed_assignment:
                 }
                 else
                     e->e.map = alloc_map_list(key, value);
-                push_expr((Expr *)HOT_OP2(e->e.map->key, e->e.map->value, e));
+                push_expr((Expr *)HOT_OP2(key, value, e));
             }
             break;
             case OP_MAKE_EMPTY_LIST:
@@ -652,7 +654,9 @@ finish_indexed_assignment:
                             panic_moo("Not a codes expression in DECOMPILE!");
                         dealloc_node(codes);
                         DECOMPILE(bc, ptr, end, nullptr, nullptr);
-                        is_hot = (is_hot || ptr++ == hot_byte);
+                        /* Step over OP_EXTENDED whether or not is_hot is already set. */
+                        if (ptr++ == hot_byte)
+                            is_hot = 1;
                         if (*ptr++ != EOP_END_CATCH)
                             panic_moo("Missing END_CATCH in DECOMPILE!");
                         done = READ_LABEL();
@@ -1058,19 +1062,32 @@ find_hot_node(Stmt * stmt)
     return 0;
 }
 
+/* Sets lineno for PC; true iff PC was placed on a statement of the program. */
+static int
+locate_line(Program * prog, int vector, unsigned pc)
+{
+    Stmt *tree = program_to_tree(prog, MAIN_VECTOR, vector, pc);
+    int found;
+
+    lineno = prog->first_lineno;
+    found = find_hot_node(tree);
+    free_stmt(tree);
+    return found;
+}
+
+unsigned
+find_line_number_or_zero(Program * prog, int vector, unsigned pc)
+{
+    return locate_line(prog, vector, pc) ? lineno : 0;
+}
+
 unsigned
 find_line_number(Program * prog, int vector, unsigned pc)
 {
-    Stmt *tree;
-
     if (prog->cached_lineno_pc == pc && prog->cached_lineno_vec == vector)
         return prog->cached_lineno;
 
-    tree = program_to_tree(prog, MAIN_VECTOR, vector, pc);
-
-    lineno = prog->first_lineno;
-    find_hot_node(tree);
-    free_stmt(tree);
+    locate_line(prog, vector, pc);
 
     if (!hot_node && hot_position != DONE)
         panic_moo("Can't do job in FIND_LINE_NUMBER!");

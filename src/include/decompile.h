@@ -20,3 +20,6 @@
 
 extern Stmt *decompile_program(Program * program, int vector);
 extern unsigned find_line_number(Program * program, int vector, unsigned pc);
+/* For a PC that need not be one a traceback can name: 0 instead of a panic
+ * when the PC belongs to no line. */
+extern unsigned find_line_number_or_zero(Program * program, int vector, unsigned pc);
