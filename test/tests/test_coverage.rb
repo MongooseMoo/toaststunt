@@ -335,6 +335,19 @@ class TestCoverage < Test::Unit::TestCase
     end
   end
 
+  # Tracebacks use the same lookup: an error in a later map pair, and a
+  # refused property store after an indexed assignment.
+  def test_traceback_lines_for_map_pairs_and_indexed_property_stores
+    with_fixture do |o|
+      add_property(o, 'p', 0, [player, 'r'])
+      define(o, 'pairs', ['x = 0;', 'return ["a" -> 1, "b" -> 1 / x];', 'x = 1;'])
+      define(o, 'store', ['x = 0;', 'this.p = {1};', 'set_task_perms(this);', 'this.p[1] = 2;', 'x = 1;'])
+      define(o, 'line', ['try', 'this:(args[1])();', 'except e (ANY)', 'return {e[1], e[4][1][6]};', 'endtry'])
+      assert_equal [E_DIV, 2], evaluate("#{o}:line(\"pairs\")")
+      assert_equal [E_PERM, 4], evaluate("#{o}:line(\"store\")")
+    end
+  end
+
   def test_recompiling_the_running_verb_then_stopping_inside_it
     with_fixture do |o|
       define(o, 'self', ['set_verb_code(this, "self", {"return 1;"});', 'x = 1;', 'return coverage_stop();'])
