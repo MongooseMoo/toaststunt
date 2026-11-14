@@ -190,4 +190,155 @@ class TestCoverage < Test::Unit::TestCase
       assert_equal [E_INVARG, {}], result
     end
   end
+
+  # The statements leave their value in r; it is compared natively.
+  def assert_result(expected, statements)
+    actual = simplify(command(%Q^; #{statements}; return equal(r, #{value_ref(expected)}) || toliteral(r);^))
+    assert_equal 1, actual
+  end
+
+  # Server panic, 2026-11-14 05:03 UTC: "Missing END_CATCH in DECOMPILE!".
+  def test_catch_expressions_are_mapped
+    with_fixture do |o|
+      define(o, 'catcher', ['x = `args[1] ! ANY\';', 'y = `args[9] ! E_RANGE => 7\';', 'return x + y;'])
+      assert_record({"#{o}:catcher" => [1, 2, 3]}, "#{o}:catcher(1)")
+    end
+  end
+
+  # Server panic, 2026-11-14 05:29 UTC: "Can't do job in FIND_LINE_NUMBER!".
+  def test_indexed_and_ranged_assignments_are_mapped
+    with_fixture do |o|
+      add_property(o, 'p', 0, [player, 'rw'])
+      define(o, 'assign', [
+        'x = {1, 2, 3};', 'x[2] = 5;', 'x[1..2] = {8, 9};', 'y = {x};', 'y[1][2] = 4;',
+        'this.p = x;', 'this.p[1] = x[$];', 'm = ["a" -> 1, "b" -> x[1]];', 'm["c"] = y;', 'return m;'
+      ])
+      assert_record({"#{o}:assign" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]}, "#{o}:assign()")
+    end
+  end
+
+  def test_every_statement_kind_is_mapped
+    with_fixture do |o|
+      add_property(o, 'p', 0, [player, 'rw'])
+      define(o, 'kinds', [
+        'x = {1, 5, 3};',          # 1
+        'y = 0;',                  # 2
+        'for v in (x)',            # 3
+        'if (v == 5)',             # 4
+        'continue;',               # 5
+        'elseif (v == 3)',         # 6
+        'break;',                  # 7
+        'else',                    # 8
+        'y = y + v;',              # 9
+        'endif',                   # 10
+        'endfor',                  # 11
+        'for i, k in (["a" -> 1])',  # 12
+        'y = y + i;',              # 13
+        'endfor',                  # 14
+        'for i in [1..2]',         # 15
+        'y = y + i;',              # 16
+        'endfor',                  # 17
+        'while (y > 100)',         # 18
+        'y = y - 1;',              # 19
+        'endwhile',                # 20
+        'while w (1)',             # 21
+        'break w;',                # 22
+        'endwhile',                # 23
+        'try',                     # 24
+        'x[10] = 1;',              # 25
+        'y = 1000;',               # 26
+        'except e (E_RANGE)',      # 27
+        'y = y + 1;',              # 28
+        'endtry',                  # 29
+        'try',                     # 30
+        'y = y + 1;',              # 31
+        'finally',                 # 32
+        'y = y + 1;',              # 33
+        'endtry',                  # 34
+        '{a, ?b = 2, @c} = {1};',  # 35
+        'y = (a && b) || (c ? 1 | 2);',  # 36
+        'y = ~y ^ 1 |. 2 &. 3 << 1 >> 1;',  # 37
+        'fork (0)',                # 38
+        'this.p = 1;',             # 39
+        'endfork',                 # 40
+        'suspend(0);',             # 41
+        'return y;'                # 42
+      ])
+      # Never reached: 19 (false loop), 26 (after the raise). `else' and `endif'
+      # have no instructions. A loop's closing line is its backward jump.
+      assert_record({"#{o}:kinds" => [1, 2, 3, 4, 5, 6, 7, 9, 11, 12, 13, 14, 15, 16, 17, 18,
+                                      21, 22, 24, 25, 27, 28, 30, 31, 32, 33, 34, 35, 36, 37,
+                                      38, 39, 41, 42]}, "#{o}:kinds()")
+    end
+  end
+
+  # The sequence that panicked the live server: start, stop, start, a verb
+  # call, stop, start, stop, in one task across verb frames.
+  def test_stop_and_start_inside_a_verb_called_while_recording
+    with_fixture do |o|
+      define(o, 'leaf', ['return 123;'])
+      define(o, 'inner', [
+        'a = coverage_stop();', 'coverage_start();', 'x = `this:leaf() ! ANY\';',
+        'b = coverage_stop();', 'coverage_start();', 'return {a, b};'
+      ])
+      assert_result([{"#{o}:inner" => [1]},
+                     {"#{o}:inner" => [2, 3, 4], "#{o}:leaf" => [1]},
+                     {"#{o}:inner" => [5, 6]}],
+        "coverage_start(); r = #{o}:inner(); r = {@r, coverage_stop()}")
+    end
+  end
+
+  def test_thousands_of_sequential_recordings_in_one_task
+    with_fixture do |o|
+      define(o, 'leaf', ['x = {1};', 'x[1] = `x[2] ! ANY => 2\';', 'return x;'])
+      assert_result([2000, {"#{o}:leaf" => [1, 2, 3]}],
+        "n = 0; for i in [1..2000] coverage_start(); #{o}:leaf(); c = coverage_stop(); n = n + (length(c) == 1); endfor r = {n, c}")
+    end
+  end
+
+  def test_second_start_inside_a_called_verb_raises_and_keeps_recording
+    with_fixture do |o|
+      define(o, 'again', ['return `coverage_start() ! ANY\';'])
+      assert_result([E_INVARG, {"#{o}:again" => [1]}],
+        "coverage_start(); e = #{o}:again(); r = {e, coverage_stop()}")
+    end
+  end
+
+  def test_a_child_stopping_the_recording_leaves_the_owner_idle
+    with_fixture do |o|
+      define(o, 'leaf', ['return 123;'])
+      assert_result([E_INVARG, 0],
+        "coverage_start(); fork (0) coverage_stop(); endfork suspend(0); #{o}:leaf(); e = `coverage_stop() ! ANY'; r = {e, coverage_start()}; coverage_stop()")
+    end
+  end
+
+  def test_recording_continues_past_suspend_and_killed_children
+    with_fixture do |o|
+      define(o, 'leaf', ['return 123;'])
+      define(o, 'sleeper', ['suspend();', 'this:leaf();'])
+      assert_result({"#{o}:leaf" => [1], "#{o}:sleeper" => [1]},
+        "coverage_start(); fork t (0) #{o}:sleeper(); endfork fork u (100) #{o}:sleeper(); endfork suspend(0); kill_task(t); kill_task(u); suspend(0); #{o}:leaf(); r = coverage_stop()")
+    end
+  end
+
+  def test_children_outliving_the_stop_run_and_record_again
+    with_fixture do |o|
+      add_property(o, 'result', 0, [player, 'rw'])
+      define(o, 'leaf', ['return 123;'])
+      define(o, 'child', [
+        'suspend();', 'this:leaf();', 'coverage_start();', 'this:leaf();', 'this.result = coverage_stop();'
+      ])
+      # One child is suspended inside a recorded verb and one has not yet run
+      # when the recording stops.
+      assert_result([{"#{o}:child" => [1]}, {"#{o}:child" => [3, 4, 5], "#{o}:leaf" => [1]}],
+        "coverage_start(); fork t (0) #{o}:child(); endfork suspend(0); fork (0) #{o}:leaf(); endfork c = coverage_stop(); resume(t); suspend(0); r = {c, #{o}.result}")
+    end
+  end
+
+  def test_recompiling_the_running_verb_then_stopping_inside_it
+    with_fixture do |o|
+      define(o, 'self', ['set_verb_code(this, "self", {"return 1;"});', 'x = 1;', 'return coverage_stop();'])
+      assert_result({"!changed:#{o}:self" => []}, "coverage_start(); r = #{o}:self()")
+    end
+  end
 end
