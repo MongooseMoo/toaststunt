@@ -15,6 +15,9 @@
     Pavel@Xerox.Com
  *****************************************************************************/
 
+#include <unordered_map>
+#include <vector>
+
 #include "ast.h"
 #include "decompile.h"
 #include "opcode.h"
@@ -27,11 +30,57 @@ static Program *program;
 static Expr **expr_stack;
 static int top_expr_stack;
 
-static Byte *hot_byte;
-static void *hot_node;
-static enum {
-    TOP, ENDBODY, BOTTOM, DONE
-} hot_position;
+/* The PCs whose lines are wanted ("hot" bytes) all lie in one bytecode vector
+ * of the program: one PC for a traceback, a bitmap of PCs for coverage.
+ * Decompiling marks the tree node each hot byte belongs to; a mark on an
+ * expression moves up to the statement that holds it.  A statement can be
+ * marked at more than one position. */
+enum { TOP = 1, ENDBODY = 2, BOTTOM = 4 };
+
+static Byte *hot_base;                      /* start of the vector with hot bytes */
+static unsigned hot_size;                   /* its length; 0 when nothing is hot */
+static unsigned hot_pc;                     /* the one hot PC, when hot_bits is null */
+static const unsigned char *hot_bits;       /* or one bit per PC */
+static std::unordered_map<void *, unsigned> hot_marks;  /* node -> positions */
+static bool any_marked;                     /* a hot byte was matched to a node */
+
+static inline bool
+is_hot_byte(const Byte *ptr)
+{
+    if (ptr < hot_base || ptr >= hot_base + hot_size)
+        return false;
+    unsigned pc = ptr - hot_base;
+    return hot_bits ? (hot_bits[pc / 8] >> (pc % 8)) & 1 : pc == hot_pc;
+}
+
+static inline void *
+mark_hot(void *node, unsigned position)
+{
+    hot_marks[node] |= position;
+    any_marked = true;
+    return node;
+}
+
+static inline bool
+is_marked(void *node, unsigned position = TOP)
+{
+    if (!any_marked)
+        return false;
+    auto mark = hot_marks.find(node);
+    return mark != hot_marks.end() && (mark->second & position);
+}
+
+/* Free a node the tree will not keep.  Returns whether it was marked, so the
+ * caller can pass the mark on; the freed address may be handed out again and
+ * must not stay marked. */
+static bool
+drop_node(void *node)
+{
+    bool marked = any_marked && hot_marks.erase(node) > 0;
+
+    dealloc_node(node);
+    return marked;
+}
 
 static int lineno;
 
@@ -93,7 +142,7 @@ read_jump(unsigned numbytes_label, Byte ** p, int *is_hot)
     Byte *ptr = *p;
     unsigned label;
 
-    *is_hot = (ptr == hot_byte);
+    *is_hot = is_hot_byte(ptr);
     if (*ptr++ != OP_JUMP)
         panic_moo("Missing JUMP in DECOMPILE!");
 
@@ -103,14 +152,14 @@ read_jump(unsigned numbytes_label, Byte ** p, int *is_hot)
     return label;
 }
 
-#define HOT(is_hot, n)      (node = n, is_hot ? (hot_node = node) : node)
-#define HOT1(is_hot, kid, n)    HOT(is_hot || hot_node == kid, n)
+#define HOT(is_hot, n)      (node = n, (is_hot) ? mark_hot(node, TOP) : node)
+#define HOT1(is_hot, kid, n)    HOT(is_hot || is_marked(kid), n)
 #define HOT2(is_hot, kid1, kid2, n) \
-    HOT1(is_hot || hot_node == kid1, kid2, n)
+    HOT1(is_hot || is_marked(kid1), kid2, n)
 #define HOT3(is_hot, kid1, kid2, kid3, n) \
-    HOT2(is_hot || hot_node == kid1, kid2, kid3, n)
+    HOT2(is_hot || is_marked(kid1), kid2, kid3, n)
 #define HOT4(is_hot, kid1, kid2, kid3, kid4, n) \
-    HOT3(is_hot || hot_node == kid1, kid2, kid3, kid4, n)
+    HOT3(is_hot || is_marked(kid1), kid2, kid3, kid4, n)
 
 #define HOT_OP(n)       HOT(op_hot, n)
 #define HOT_OP1(kid, n)     HOT1(op_hot, kid, n)
@@ -119,7 +168,7 @@ read_jump(unsigned numbytes_label, Byte ** p, int *is_hot)
     HOT3(op_hot, kid1, kid2, kid3, n)
 
 #define HOT_POS(is_hot, n, pos) \
-    if (is_hot) { hot_node = n; hot_position = pos; }
+    if (is_hot) { mark_hot(n, pos); }
 #define HOT_BOTTOM(is_hot, n)   HOT_POS(is_hot, n, BOTTOM)
 
 #define DECOMPILE(bc, start, end, stmt_sink, arm_sink)  \
@@ -148,7 +197,7 @@ decompile(Bytecodes bc, Byte * start, Byte * end, Stmt ** stmt_sink,
         *arm_sink = nullptr;
 
     while (ptr < end) {
-        int op_hot = (ptr == hot_byte);
+        int op_hot = is_hot_byte(ptr);
         Opcode op = (Opcode)(*ptr++);
 
         if (IS_PUSH_n(op)) {
@@ -270,7 +319,7 @@ finish_while:
                 s->s.fork.time = time;
                 (void) decompile(fbc, fbc.vector, fbc.vector + fbc.size,
                                  &(s->s.fork.body), nullptr);
-                HOT_BOTTOM(hot_byte == fbc.vector + fbc.size - 1, s);
+                HOT_BOTTOM(is_hot_byte(fbc.vector + fbc.size - 1), s);
                 ADD_STMT((Stmt *)HOT_OP1(time, s));
             }
             break;
@@ -283,7 +332,7 @@ finish_while:
             case OP_RETURN0:
                 s = alloc_stmt(STMT_RETURN);
                 e = s->s.expr = (op == OP_RETURN ? pop_expr() : nullptr);
-                ADD_STMT((Stmt *)HOT(op_hot || (e && e == hot_node), s));
+                ADD_STMT((Stmt *)HOT(op_hot || (e && is_marked(e)), s));
                 break;
             case OP_DONE:
                 if (ptr != end)
@@ -390,9 +439,9 @@ finish_binary:
                     panic_moo("Missing arglist for BI_FUNC_CALL in DECOMPILE!");
                 e = alloc_expr(EXPR_CALL);
                 e->e.call.args = a->e.list;
-                dealloc_node(a);
+                bool args_hot = drop_node(a);
                 e->e.call.func = READ_BYTES(1);
-                push_expr((Expr *)HOT_OP1(a, e));
+                push_expr((Expr *)HOT(op_hot || args_hot, e));
             }
             break;
             case OP_CALL_VERB:
@@ -403,8 +452,8 @@ finish_binary:
                 if (a->kind != EXPR_LIST)
                     panic_moo("Missing arglist for CALL_VERB in DECOMPILE!");
                 e = alloc_verb(pop_expr(), e2, a->e.list);
-                dealloc_node(a);
-                push_expr((Expr *)HOT_OP3(e->e.verb.obj, a, e2, e));
+                bool args_hot = drop_node(a);
+                push_expr((Expr *)HOT2(op_hot || args_hot, e->e.verb.obj, e2, e));
             }
             break;
             case OP_IF_QUES:
@@ -450,12 +499,12 @@ finish_indexed_assignment:
                  */
             asgn_hot = 0;
             while (*ptr != OP_PUSH_TEMP) {
-                if (ptr == hot_byte)    /* it's our assignment expression */
-                    hot_node = expr_stack[top_expr_stack - 1];
+                if (is_hot_byte(ptr))   /* it's our assignment expression */
+                    mark_hot(expr_stack[top_expr_stack - 1], TOP);
                 ptr++;
             }
-            if (ptr == hot_byte)    /* the closing PUSH_TEMP is part of it too */
-                hot_node = expr_stack[top_expr_stack - 1];
+            if (is_hot_byte(ptr))   /* the closing PUSH_TEMP is part of it too */
+                mark_hot(expr_stack[top_expr_stack - 1], TOP);
             ptr++;
             break;
             case OP_G_PUT:
@@ -613,9 +662,9 @@ finish_indexed_assignment:
                                         || defallt->e.bin.lhs->e.id != sc->id)
                                     panic_moo("Wrong variable in DECOMPILE!");
                                 sc->expr = defallt->e.bin.rhs;
-                                dealloc_node(defallt->e.bin.lhs);
-                                dealloc_node(defallt);
-                                is_hot = (is_hot || ptr == hot_byte);
+                                drop_node(defallt->e.bin.lhs);
+                                drop_node(defallt);
+                                is_hot = (is_hot || is_hot_byte(ptr));
                                 if (*ptr++ != OP_POP)
                                     panic_moo("Missing default POP in DECOMPILE!");
                             }
@@ -643,7 +692,8 @@ finish_indexed_assignment:
                                 || label_expr->e.var.type != TYPE_INT)
                             panic_moo("Not a catch label in DECOMPILE!");
                         label = label_expr->e.var.v.num;
-                        dealloc_node(label_expr);
+                        if (drop_node(label_expr))
+                            is_hot = 1;
                         if (codes->kind == EXPR_LIST)
                             a = codes->e.list;
                         else if (codes->kind == EXPR_VAR
@@ -652,10 +702,11 @@ finish_indexed_assignment:
                             a = nullptr;
                         else
                             panic_moo("Not a codes expression in DECOMPILE!");
-                        dealloc_node(codes);
+                        if (drop_node(codes))
+                            is_hot = 1;
                         DECOMPILE(bc, ptr, end, nullptr, nullptr);
                         /* Step over OP_EXTENDED whether or not is_hot is already set. */
-                        if (ptr++ == hot_byte)
+                        if (is_hot_byte(ptr++))
                             is_hot = 1;
                         if (*ptr++ != EOP_END_CATCH)
                             panic_moo("Missing END_CATCH in DECOMPILE!");
@@ -663,11 +714,11 @@ finish_indexed_assignment:
                         try_expr = pop_expr();
                         if (ptr != bc.vector + label)
                             panic_moo("Misplaced handler in DECOMPILE!");
-                        is_hot = (is_hot || ptr == hot_byte);
+                        is_hot = (is_hot || is_hot_byte(ptr));
                         op = (Opcode)(*ptr++);
                         if (op == OPTIM_NUM_TO_OPCODE(1)) {
                             /* No default expression */
-                            is_hot = (is_hot || ptr == hot_byte);
+                            is_hot = (is_hot || is_hot_byte(ptr));
                             if (*ptr++ != OP_REF)
                                 panic_moo("Missing REF in DECOMPILE!");
                             default_expr = nullptr;
@@ -683,10 +734,9 @@ finish_indexed_assignment:
                         e->e._catch._try = try_expr;
                         e->e._catch.codes = a;
                         e->e._catch.except = default_expr;
-                        push_expr((Expr *)HOT3(is_hot || (default_expr
-                                                          && default_expr == hot_node),
-                                               label_expr, codes, try_expr,
-                                               e));
+                        push_expr((Expr *)HOT1(is_hot || (default_expr
+                                                          && is_marked(default_expr)),
+                                               try_expr, e));
                     }
                     break;
                     case EOP_END_CATCH:
@@ -708,7 +758,7 @@ finish_indexed_assignment:
                                     || label_expr->e.var.type != TYPE_INT)
                                 panic_moo("Not an except label in DECOMPILE!");
                             label = label_expr->e.var.v.num;
-                            dealloc_node(label_expr);
+                            bool arm_hot = drop_node(label_expr);
                             e = pop_expr();
                             if (e->kind == EXPR_LIST)
                                 a = e->e.list;
@@ -718,15 +768,16 @@ finish_indexed_assignment:
                                 a = nullptr;
                             else
                                 panic_moo("Not a codes expression in DECOMPILE!");
-                            dealloc_node(e);
+                            if (drop_node(e))
+                                arm_hot = true;
                             ex = alloc_except(-1, a, nullptr);
                             ex->label = label;
                             ex->next = s->s._catch.excepts;
-                            HOT2(0, label_expr, e, ex);
+                            HOT(arm_hot, ex);
                             s->s._catch.excepts = ex;
                         }
                         DECOMPILE(bc, ptr, end, &(s->s._catch.body), nullptr);
-                        HOT_POS(ptr++ == hot_byte, s, ENDBODY);
+                        HOT_POS(is_hot_byte(ptr++), s, ENDBODY);
                         if (*ptr++ != EOP_END_EXCEPT)
                             panic_moo("Missing END_EXCEPT in DECOMPILE!");
                         done = READ_LABEL();
@@ -736,7 +787,7 @@ finish_indexed_assignment:
 
                             if (ex->label != ptr - bc.vector)
                                 panic_moo("Not at start of handler in DECOMPILE!");
-                            op_hot = (ptr == hot_byte);
+                            op_hot = is_hot_byte(ptr);
                             op = (Opcode)(*ptr++);
                             if (op == OP_G_PUT) {
                                 ex->id = READ_ID();
@@ -745,7 +796,7 @@ finish_indexed_assignment:
                                 ex->id = PUT_n_INDEX(op);
                                 op = (Opcode)(*ptr++);
                             }
-                            HOT(op_hot || ptr - 1 == hot_byte, ex);
+                            HOT(op_hot || is_hot_byte(ptr - 1), ex);
                             if (op != OP_POP)
                                 panic_moo("Missing POP in DECOMPILE!");
                             if (ex->next)
@@ -772,14 +823,14 @@ finish_indexed_assignment:
 
                         s = (Stmt *)HOT_OP(alloc_stmt(STMT_TRY_FINALLY));
                         DECOMPILE(bc, ptr, end, &(s->s.finally.body), nullptr);
-                        HOT_POS(ptr++ == hot_byte, s, ENDBODY);
+                        HOT_POS(is_hot_byte(ptr++), s, ENDBODY);
                         if (*ptr++ != EOP_END_FINALLY)
                             panic_moo("Missing END_FINALLY in DECOMPILE!");
                         if (ptr - bc.vector != label)
                             panic_moo("FINALLY handler in wrong place in "
                                       "DECOMPILE!");
                         DECOMPILE(bc, ptr, end, &(s->s.finally.handler), nullptr);
-                        HOT_BOTTOM(ptr++ == hot_byte, s);
+                        HOT_BOTTOM(is_hot_byte(ptr++), s);
                         if (*ptr++ != EOP_CONTINUE)
                             panic_moo("Missing CONTINUE in DECOMPILE!");
                         ADD_STMT(s);
@@ -818,12 +869,13 @@ finish_indexed_assignment:
                         Expr *iter = pop_expr();
                         Expr *list = pop_expr();
                         int jump_hot;
+                        bool iter_hot = false;
 
                         if (iter->kind != EXPR_VAR
                                 || iter->e.var.type != TYPE_NONE)
                             panic_moo("Not a `none' value in DECOMPILE!");
                         else
-                            dealloc_node(iter);
+                            iter_hot = drop_node(iter);
                         s = alloc_stmt(STMT_LIST);
                         s->s.list.id = id;
                         s->s.list.index = -1;
@@ -833,7 +885,7 @@ finish_indexed_assignment:
                         if (top != READ_JUMP(jump_hot))
                             panic_moo("FOR_LIST_1 jumps to wrong place in DECOMPILE!");
                         HOT_BOTTOM(jump_hot, s);
-                        ADD_STMT((Stmt *)HOT_OP2(iter, list, s));
+                        ADD_STMT((Stmt *)HOT1(op_hot || iter_hot, list, s));
                     }
                     break;
 
@@ -846,12 +898,13 @@ finish_indexed_assignment:
                         Expr *iter = pop_expr();
                         Expr *list = pop_expr();
                         int jump_hot;
+                        bool iter_hot = false;
 
                         if (iter->kind != EXPR_VAR
                                 || iter->e.var.type != TYPE_NONE)
                             panic_moo("Not a `none' value in DECOMPILE!");
                         else
-                            dealloc_node(iter);
+                            iter_hot = drop_node(iter);
                         s = alloc_stmt(STMT_LIST);
                         s->s.list.id = id;
                         s->s.list.index = index;
@@ -861,7 +914,7 @@ finish_indexed_assignment:
                         if (top != READ_JUMP(jump_hot))
                             panic_moo("FOR_LIST_2 jumps to wrong place in DECOMPILE!");
                         HOT_BOTTOM(jump_hot, s);
-                        ADD_STMT((Stmt *)HOT_OP2(iter, list, s));
+                        ADD_STMT((Stmt *)HOT1(op_hot || iter_hot, list, s));
                     }
                     break;
 
@@ -907,8 +960,11 @@ finish_extended_binary:
     return ptr;
 }
 
+/* Decompile VECTOR of PROG.  The hot bytes are in PC_VECTOR: the bits of
+ * PC_BITS if given, else the single PC, else (PC < 0) none. */
 static Stmt *
-program_to_tree(Program * prog, int vector, int pc_vector, int pc)
+program_to_tree(Program * prog, int vector, int pc_vector, int pc,
+                const unsigned char *pc_bits)
 {
     Stmt *result;
     Bytecodes bc;
@@ -919,15 +975,17 @@ program_to_tree(Program * prog, int vector, int pc_vector, int pc)
           ? program->main_vector
           : program->fork_vectors[pc_vector]);
 
-    if (pc < 0)
-        hot_byte = nullptr;
-    else if (pc < bc.size)
-        hot_byte = bc.vector + pc;
-    else
+    hot_bits = pc_bits;
+    hot_base = bc.vector;
+    if (pc_bits)
+        hot_size = bc.size;
+    else if (pc < 0)
+        hot_size = 0;
+    else if (pc < bc.size) {
+        hot_size = bc.size;
+        hot_pc = pc;
+    } else
         panic_moo("Illegal PC in FIND_LINE_NUMBER!");
-
-    hot_node = nullptr;
-    hot_position = (pc == bc.size - 1 ? DONE : TOP);
 
     sum = program->main_vector.max_stack;
     for (i = 0; i < program->fork_vectors_size; i++)
@@ -951,21 +1009,21 @@ program_to_tree(Program * prog, int vector, int pc_vector, int pc)
 Stmt *
 decompile_program(Program * prog, int vector)
 {
-    return program_to_tree(prog, vector, MAIN_VECTOR, -1);
+    return program_to_tree(prog, vector, MAIN_VECTOR, -1, nullptr);
 }
 
-static int
-find_hot_node(Stmt * stmt)
+static void
+add_hot_lines(Stmt * stmt, std::vector<unsigned> &lines)
 {
     /* Invariants: on entry, lineno is number of first line of STMT
-     *                   on exit, if result is true,
-     *                            lineno is line number of hot_node/position
-     *                      else, lineno is number of first line after STMT
+     *                   on exit, lineno is number of first line after STMT
+     * The line of every marked node and position is appended to LINES, in
+     * the order the walk meets them.
      */
 
     for (; stmt; stmt = stmt->next) {
-        if (stmt == hot_node && hot_position == TOP)
-            return 1;
+        if (is_marked(stmt, TOP))
+            lines.push_back(lineno);
 
         switch (stmt->kind) {
             case STMT_COND:
@@ -973,42 +1031,34 @@ find_hot_node(Stmt * stmt)
                 Cond_Arm *arm;
 
                 for (arm = stmt->s.cond.arms; arm; arm = arm->next) {
-                    if (arm == hot_node && hot_position == TOP)
-                        return 1;
+                    if (is_marked(arm, TOP))
+                        lines.push_back(lineno);
                     lineno++;   /* advance to arm body */
-                    if (find_hot_node(arm->stmt))
-                        return 1;
-                    else if (arm == hot_node && hot_position == BOTTOM) {
-                        lineno--;   /* Blame last line of arm */
-                        return 1;
-                    }
+                    add_hot_lines(arm->stmt, lines);
+                    if (is_marked(arm, BOTTOM))
+                        lines.push_back(lineno - 1);    /* Blame last line of arm */
                 }
                 if (stmt->s.cond.otherwise) {
                     lineno++;   /* Skip `else' line */
-                    if (find_hot_node(stmt->s.cond.otherwise))
-                        return 1;
+                    add_hot_lines(stmt->s.cond.otherwise, lines);
                 }
             }
             break;
             case STMT_LIST:
                 lineno++;       /* Skip `for' line */
-                if (find_hot_node(stmt->s.list.body))
-                    return 1;
+                add_hot_lines(stmt->s.list.body, lines);
                 break;
             case STMT_RANGE:
                 lineno++;       /* Skip `for' line */
-                if (find_hot_node(stmt->s.range.body))
-                    return 1;
+                add_hot_lines(stmt->s.range.body, lines);
                 break;
             case STMT_WHILE:
                 lineno++;       /* Skip `while' line */
-                if (find_hot_node(stmt->s.loop.body))
-                    return 1;
+                add_hot_lines(stmt->s.loop.body, lines);
                 break;
             case STMT_FORK:
                 lineno++;       /* Skip `fork' line */
-                if (find_hot_node(stmt->s.fork.body))
-                    return 1;
+                add_hot_lines(stmt->s.fork.body, lines);
                 break;
             case STMT_EXPR:
             case STMT_RETURN:
@@ -1021,79 +1071,84 @@ find_hot_node(Stmt * stmt)
                 Except_Arm *ex;
 
                 lineno++;   /* Skip `try' line */
-                if (find_hot_node(stmt->s._catch.body))
-                    return 1;
-                if (stmt == hot_node && hot_position == ENDBODY) {
-                    lineno--;   /* blame it on last line of body */
-                    return 1;
-                }
+                add_hot_lines(stmt->s._catch.body, lines);
+                if (is_marked(stmt, ENDBODY))
+                    lines.push_back(lineno - 1);    /* blame it on last line of body */
                 for (ex = stmt->s._catch.excepts; ex; ex = ex->next) {
-                    if (ex == hot_node && hot_position == TOP)
-                        return 1;
+                    if (is_marked(ex, TOP))
+                        lines.push_back(lineno);
                     lineno++;   /* skip `except' line */
-                    if (find_hot_node(ex->stmt))
-                        return 1;
-                    if (ex == hot_node && hot_position == BOTTOM) {
-                        lineno--;   /* blame last line of handler */
-                        return 1;
-                    }
+                    add_hot_lines(ex->stmt, lines);
+                    if (is_marked(ex, BOTTOM))
+                        lines.push_back(lineno - 1);    /* blame last line of handler */
                 }
             }
             break;
             case STMT_TRY_FINALLY:
                 lineno++;       /* Skip `try' line */
-                if (find_hot_node(stmt->s.finally.body)
-                        || (stmt == hot_node && hot_position == ENDBODY))
-                    return 1;
+                add_hot_lines(stmt->s.finally.body, lines);
+                if (is_marked(stmt, ENDBODY))
+                    lines.push_back(lineno);
                 lineno++;       /* Skip `finally' line */
-                if (find_hot_node(stmt->s.finally.handler))
-                    return 1;
+                add_hot_lines(stmt->s.finally.handler, lines);
                 break;
             default:
-                panic_moo("Unknown statement kind in FIND_HOT_NODE!");
+                panic_moo("Unknown statement kind in ADD_HOT_LINES!");
         }
 
-        if (stmt == hot_node && hot_position == BOTTOM)
-            return 1;
+        if (is_marked(stmt, BOTTOM))
+            lines.push_back(lineno);
 
         lineno++;       /* Count this statement */
     }
-
-    return 0;
 }
 
-/* Sets lineno for PC; true iff PC was placed on a statement of the program. */
-static int
-locate_line(Program * prog, int vector, unsigned pc)
+/* Decompile PROG once and append to LINES the line of every hot byte that
+ * belongs to one.  Leaves lineno one past the last line of PROG.  Returns
+ * whether any hot byte was matched to a node. */
+static bool
+lines_of_hot_bytes(Program * prog, int vector, int pc, const unsigned char *pc_bits,
+                   std::vector<unsigned> &lines)
 {
-    Stmt *tree = program_to_tree(prog, MAIN_VECTOR, vector, pc);
-    int found;
+    Stmt *tree = program_to_tree(prog, MAIN_VECTOR, vector, pc, pc_bits);
+    bool matched;
 
     lineno = prog->first_lineno;
-    found = find_hot_node(tree);
+    add_hot_lines(tree, lines);
     free_stmt(tree);
-    return found;
+
+    matched = any_marked;
+    hot_size = 0;
+    any_marked = false;
+    std::unordered_map<void *, unsigned>().swap(hot_marks);
+    return matched;
 }
 
-unsigned
-find_line_number_or_zero(Program * prog, int vector, unsigned pc)
+void
+find_line_numbers(Program * prog, int vector, const unsigned char *pc_bits,
+                  std::vector<unsigned> &lines)
 {
-    return locate_line(prog, vector, pc) ? lineno : 0;
+    lines_of_hot_bytes(prog, vector, 0, pc_bits, lines);
 }
 
 unsigned
 find_line_number(Program * prog, int vector, unsigned pc)
 {
+    std::vector<unsigned> lines;
+    unsigned size, line;
+
     if (prog->cached_lineno_pc == pc && prog->cached_lineno_vec == vector)
         return prog->cached_lineno;
 
-    locate_line(prog, vector, pc);
-
-    if (!hot_node && hot_position != DONE)
+    size = (vector == MAIN_VECTOR ? prog->main_vector : prog->fork_vectors[vector]).size;
+    /* The final instruction of a vector has no node; it gets the line after
+     * the program, or its `endfork'. */
+    if (!lines_of_hot_bytes(prog, vector, pc, nullptr, lines) && pc != size - 1)
         panic_moo("Can't do job in FIND_LINE_NUMBER!");
+    line = lines.empty() ? lineno : lines.front();
 
     prog->cached_lineno_vec = vector;
     prog->cached_lineno_pc = pc;
-    prog->cached_lineno = lineno;
-    return lineno;
+    prog->cached_lineno = line;
+    return line;
 }

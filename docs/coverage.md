@@ -45,7 +45,7 @@ not awaited or killed.
 
 The disabled opcode path checks one pointer and does not change MOO tick
 accounting. Recording sets bits for program/vector/PC; only stop maps PCs to
-lines, with `find_line_number_or_zero()`: the traceback mapper's lookup, which
-leaves out a PC that belongs to no line where `find_line_number()` would panic.
-Stop's conversion uses CPU time,
-and large recordings can be expensive because that mapper decompiles programs.
+lines, with `find_line_numbers()`: the traceback mapper's lookup given all of a
+vector's recorded PCs at once. It decompiles each recorded vector once and
+leaves out a PC that belongs to no line, where `find_line_number()` would panic.
+Stop's conversion uses CPU time: one decompile for each recorded verb.
