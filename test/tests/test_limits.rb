@@ -185,6 +185,32 @@ class TestLimits < Test::Unit::TestCase
     end
   end
 
+  def test_that_adding_to_a_list_checks_list_max_value_bytes
+    run_test_as('wizard') do
+      [90, 250, 1000].each do |n|
+        n += rand(-10..10)
+        set_max_value_bytes(1000000)
+        size = simplify(command("; x = {}; for i in [1..#{n}]; x = x + i; endfor; return value_bytes(x);"))
+        set_max_value_bytes(size + 1)
+        assert_equal size, simplify(command("; x = {}; for i in [1..#{n}]; x = x + i; endfor; return value_bytes(x);"))
+        assert_equal E_QUOTA, simplify(command("; x = {}; for i in [1..#{n + 1}]; x = x + i; endfor; return value_bytes(x);"))
+      end
+    end
+  end
+
+  def test_that_concatenating_lists_checks_list_max_value_bytes
+    run_test_as('wizard') do
+      [90, 250, 1000].each do |n|
+        n += rand(-10..10)
+        set_max_value_bytes(1000000)
+        size = simplify(command("; x = {}; for i in [1..#{n}]; x = x + {i}; endfor; return value_bytes(x);"))
+        set_max_value_bytes(size + 1)
+        assert_equal size, simplify(command("; x = {}; for i in [1..#{n}]; x = x + {i}; endfor; return value_bytes(x);"))
+        assert_equal E_QUOTA, simplify(command("; x = {}; for i in [1..#{n + 1}]; x = x + {i}; endfor; return value_bytes(x);"))
+      end
+    end
+  end
+
   def test_that_indexset_on_a_list_checks_list_max_value_bytes
     run_test_as('wizard') do
       [90, 250, 1000].each do |n|
