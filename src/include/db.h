@@ -444,7 +444,10 @@ extern void db_set_property_value(db_prop_handle, Var);
 				 */
 
 extern Objid db_property_owner(db_prop_handle);
-extern void db_set_property_owner(db_prop_handle, Objid);
+extern void db_set_property_owner(Var obj, db_prop_handle, Objid);
+				/* OBJ is the object the handle was found on;
+				 * the property value written is OBJ's own.
+				 */
 				/* These functions may not be called for
 				 * built-in properties.
 				 */
@@ -668,17 +671,15 @@ extern void db_delete_verb(db_verb_handle);
 				 * this call returns.
 				 */
 
-extern void db_note_owner(Objid owner);
-				/* Record that OWNER's number has been stored in an
-				 * owner field.  Every owner assignment calls this.
-				 */
-extern void db_note_all_owners(void);
-				/* Mark every owner in the database; run once after
-				 * loading.
+extern void db_count_all_owners(void);
+				/* Recount, for every object, the owner fields
+				 * that name it; run once after loading.
 				 */
 extern bool db_object_is_owner(Objid oid);
-				/* True if OID has ever been stored as an owner since
-				 * it was created; false means no owner field names it.
+				/* True if an owner field of a permanent object
+				 * names OID now, or an anonymous object's owner
+				 * field has named it since it was created; false
+				 * means no owner field names it.
 				 */
 
 extern void db_fixup_owners(const Objid obj);

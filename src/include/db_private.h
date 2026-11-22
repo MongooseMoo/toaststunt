@@ -77,10 +77,17 @@ typedef struct Object {
     /* Native allocation kind, independent of permissions and temporary dump
      * object IDs. Initialized by every allocator; not part of the DB format. */
     bool anonymous_storage;
-    /* Set once this object's number is stored in any owner field (object,
-     * verb or property value); never cleared while it lives. recycle()
-     * skips the SAFE_RECYCLE owner scan when it is clear. Not in the DB. */
-    bool is_owner;
+    /* How many owner fields (object owner, verb owner, property value owner)
+     * of permanent objects name this object now. Kept by db_owner_ref() and
+     * db_owner_unref() wherever such a field is written or removed, and
+     * recounted after loading. Not in the DB. */
+    Num owned_count;
+    /* Set once this object's number is stored in an owner field of an
+     * anonymous object; never cleared while it lives. Anonymous holders are
+     * not counted, because a recount cannot reach every anonymous object.
+     * recycle() skips the SAFE_RECYCLE owner scan only when owned_count is
+     * zero and this is clear (db_object_is_owner()). Not in the DB. */
+    bool anon_owner;
 } Object;
 
 /*
@@ -119,6 +126,16 @@ extern void db_write_anonymous(Var);
 
 extern Objid dbpriv_object_owner(Object *);
 extern void dbpriv_set_object_owner(Object *, Objid owner);
+
+extern void db_owner_ref(Object *holder, Objid owner);
+				/* An owner field of HOLDER now names OWNER.
+				 * Call after storing OWNER in any object, verb
+				 * or property value owner field. */
+extern void db_owner_unref(Object *holder, Objid owner);
+				/* An owner field of HOLDER that named OWNER was
+				 * overwritten or removed. Call before freeing a
+				 * verb or property value or overwriting an owner
+				 * field. */
 
 extern const char *dbpriv_object_name(Object *);
 extern void dbpriv_set_object_name(Object *, const char *);
