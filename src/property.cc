@@ -181,7 +181,7 @@ set_prop_info(Var obj, const char *pname, Var info, Objid progr)
 
         h = db_find_property(obj, new_name, nullptr);
     }
-    db_set_property_owner(h, new_owner);
+    db_set_property_owner(obj, h, new_owner);
     db_set_property_flags(h, new_flags);
 
     return E_NONE;

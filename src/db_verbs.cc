@@ -213,7 +213,7 @@ db_add_verb(Var obj, const char *vnames, Objid owner, unsigned flags,
     newv = (Verbdef *)mymalloc(sizeof(Verbdef), M_VERBDEF);
     newv->name = vnames;
     newv->owner = owner;
-    db_note_owner(owner);
+    db_owner_ref(o, owner);
     newv->perms = flags | (dobj << DOBJSHIFT) | (iobj << IOBJSHIFT);
     newv->prep = prep;
     newv->next = nullptr;
@@ -296,6 +296,7 @@ db_delete_verb(db_verb_handle vh)
         vv->next = v->next;
     }
 
+    db_owner_unref(o, v->owner);
     if (v->program)
         free_program(v->program);
     if (v->name)
@@ -824,8 +825,9 @@ db_set_verb_owner(db_verb_handle vh, Objid owner)
     handle *h = (handle *) vh.ptr;
 
     if (h) {
+        db_owner_unref(h->definer, h->verbdef->owner);
         h->verbdef->owner = owner;
-        db_note_owner(owner);
+        db_owner_ref(h->definer, owner);
     } else
         panic_moo("DB_SET_VERB_OWNER: Null handle!");
 }

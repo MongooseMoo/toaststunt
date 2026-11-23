@@ -147,6 +147,7 @@ insert_prop2(Var obj, int pos, Pval pval)
     new_propval[pos].var = var_ref(pval.var);
     if (new_propval[pos].perms & PF_CHOWN)
         new_propval[pos].owner = o->owner;
+    db_owner_ref(o, new_propval[pos].owner);
 
     for (i = pos + 1; i < nprops; i++)
         new_propval[i] = o->propval[i - 1];
@@ -232,7 +233,6 @@ db_add_propdef(Var obj, const char *pname, Var value, Objid owner,
 
     pval.var = value;
     pval.owner = owner;
-    db_note_owner(owner);
     pval.perms = flags;
 
     /* anonymous objects can't have children */
@@ -313,6 +313,7 @@ remove_prop2(Var obj, int pos)
     o->waif_propdefs = nullptr;
 
     free_var(o->propval[pos].var);  /* free deleted property */
+    db_owner_unref(o, o->propval[pos].owner);
 
     if (nprops) {
         new_propval = (Pval *)mymalloc(nprops * sizeof(Pval), M_PVAL);
@@ -728,15 +729,17 @@ db_property_owner(db_prop_handle h)
 }
 
 void
-db_set_property_owner(db_prop_handle h, Objid oid)
+db_set_property_owner(Var obj, db_prop_handle h, Objid oid)
 {
     if (h.built_in)
         panic_moo("Built-in property in DB_SET_PROPERTY_OWNER!");
     else {
         Pval *prop = (Pval *)h.ptr;
+        Object *holder = dbpriv_dereference(obj);
 
+        db_owner_unref(holder, prop->owner);
         prop->owner = oid;
-        db_note_owner(oid);
+        db_owner_ref(holder, oid);
     }
 }
 
@@ -1059,12 +1062,16 @@ relayout_properties(Var obj, Var old_ancestors, Var new_ancestors)
      */
     int c;
     if (me->propval) {
-        for (c = 0; c < have; c++)
+        for (c = 0; c < have; c++) {
             free_var(me->propval[c].var);
+            db_owner_unref(me, me->propval[c].owner);
+        }
         myfree(me->propval, M_PVAL);
     }
     me->propval = new_propval;
     me->nval = new_count;
+    for (c = 0; c < new_count; c++)
+        db_owner_ref(me, new_propval[c].owner);
 
     myfree(old_offsets, M_INT);
     myfree(new_offsets, M_INT);

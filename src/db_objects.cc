@@ -54,9 +54,15 @@ static Num max_objects = 0;
  * like children(), we just keep track of them here. */
 static std::unordered_map<Objid, std::unordered_set<Object*>> anonymous_objects;
 
-/* Owner numbers that named no object when they were stored. An object later
- * created with one of these numbers starts out marked as an owner. */
-static std::unordered_set<Objid> unbound_owners;
+/* Owner fields of permanent objects that name a number with no permanent
+ * object behind it (never created, recycled without SAFE_RECYCLE, or made
+ * anonymous). An object later created at that number takes the count over. */
+static std::unordered_map<Objid, Num> unbound_owner_counts;
+
+/* Numbers with no permanent object behind them that an anonymous object's
+ * owner field has named. An object later created at one starts with
+ * anon_owner set. */
+static std::unordered_set<Objid> unbound_anon_owners;
 
 static Var all_users;
 
@@ -244,50 +250,108 @@ dbpriv_new_object(Num new_objid, bool anonymous)
     o = objects[new_objid] = (Object *)mymalloc(sizeof(Object), mem_type);
     o->id = new_objid;
     o->anonymous_storage = anonymous;
-    o->is_owner = unbound_owners.erase(new_objid) > 0;
+    o->owner = NOTHING;
+    auto bound = unbound_owner_counts.find(new_objid);
+    if (bound != unbound_owner_counts.end()) {
+        o->owned_count = bound->second;
+        unbound_owner_counts.erase(bound);
+    } else
+        o->owned_count = 0;
+    o->anon_owner = unbound_anon_owners.erase(new_objid) > 0;
 
     o->waif_propdefs = nullptr;
 
     return o;
 }
 
+/* The permanent object OWNER names, or null when the number has none. */
+static Object *
+owner_object(Objid owner)
+{
+    if (owner < num_objects && objects[owner] && !objects[owner]->anonymous_storage)
+        return objects[owner];
+    return nullptr;
+}
+
 void
-db_note_owner(Objid owner)
+db_owner_ref(Object *holder, Objid owner)
 {
     if (owner < 0)
         return;
-    if (owner < num_objects && objects[owner] && !objects[owner]->anonymous_storage)
-        objects[owner]->is_owner = true;
+    Object *o = owner_object(owner);
+    if (holder && holder->anonymous_storage) {
+        if (o)
+            o->anon_owner = true;
+        else
+            unbound_anon_owners.insert(owner);
+    } else if (o)
+        o->owned_count++;
     else
-        unbound_owners.insert(owner);
-}
-
-static void
-note_owners_in(Object *o)
-{
-    db_note_owner(o->owner);
-    for (Verbdef *v = o->verbdefs; v; v = v->next)
-        db_note_owner(v->owner);
-    for (unsigned int i = 0; i < o->nval; i++)
-        db_note_owner(o->propval[i].owner);
+        unbound_owner_counts[owner]++;
 }
 
 void
-db_note_all_owners(void)
+db_owner_unref(Object *holder, Objid owner)
 {
+    if (owner < 0 || (holder && holder->anonymous_storage))
+        return;
+    Object *o = owner_object(owner);
+    if (o) {
+        if (o->owned_count > 0)
+            o->owned_count--;
+    } else {
+        auto bound = unbound_owner_counts.find(owner);
+        if (bound != unbound_owner_counts.end() && --bound->second <= 0)
+            unbound_owner_counts.erase(bound);
+    }
+}
+
+static void
+ref_owners_in(Object *o)
+{
+    db_owner_ref(o, o->owner);
+    for (Verbdef *v = o->verbdefs; v; v = v->next)
+        db_owner_ref(o, v->owner);
+    for (unsigned int i = 0; i < o->nval; i++)
+        db_owner_ref(o, o->propval[i].owner);
+}
+
+static void
+unref_owners_in(Object *o)
+{
+    db_owner_unref(o, o->owner);
+    for (Verbdef *v = o->verbdefs; v; v = v->next)
+        db_owner_unref(o, v->owner);
+    for (unsigned int i = 0; i < o->nval; i++)
+        db_owner_unref(o, o->propval[i].owner);
+}
+
+void
+db_count_all_owners(void)
+{
+    unbound_owner_counts.clear();
+    unbound_anon_owners.clear();
+    for (Objid oid = 0; oid < num_objects; oid++)
+        if (objects[oid]) {
+            objects[oid]->owned_count = 0;
+            objects[oid]->anon_owner = false;
+        }
+
     for (Objid oid = 0; oid < num_objects; oid++)
         if (objects[oid])
-            note_owners_in(objects[oid]);
+            ref_owners_in(objects[oid]);
 
+    /* Anonymous holders only set anon_owner, so one reached twice (in
+     * objects[] while loading and in this map) changes nothing. */
     for (const auto& x : anonymous_objects)
         for (const auto& y : x.second)
-            note_owners_in(y);
+            ref_owners_in(y);
 }
 
 bool
 db_object_is_owner(Objid oid)
 {
-    return objects[oid]->is_owner;
+    return objects[oid]->owned_count > 0 || objects[oid]->anon_owner;
 }
 
 Object *
@@ -299,7 +363,9 @@ dbpriv_new_anonymous_object(void)
     o = objects[num_objects] = (Object *)mymalloc(sizeof(Object), M_ANON);
     o->id = NOTHING;
     o->anonymous_storage = true;
-    o->is_owner = false;
+    o->owner = NOTHING;
+    o->owned_count = 0;
+    o->anon_owner = false;
     num_objects++;
 
     o->waif_propdefs = nullptr;
@@ -382,6 +448,14 @@ db_destroy_object(Objid oid)
 
     if (!o)
         panic_moo("DB_DESTROY_OBJECT: Invalid object!");
+
+    /* Its own owner fields go with it. Fields elsewhere that still name it
+     * (none after the SAFE_RECYCLE fixup) now name a free number. */
+    unref_owners_in(o);
+    if (o->owned_count > 0)
+        unbound_owner_counts[oid] += o->owned_count;
+    if (o->anon_owner)
+        unbound_anon_owners.insert(oid);
 
     if (o->location.v.obj != NOTHING ||
             o->contents.v.list[0].v.num != 0 ||
@@ -488,11 +562,25 @@ db_make_anonymous(Objid oid, Objid last)
 {
     Object *o = objects[oid];
 
+    /* Its owner fields stop being counted and mark their owners as named by
+     * an anonymous object; fields that named OID now name a free number. */
+    bool was_permanent = !o->anonymous_storage;
+    if (was_permanent)
+        unref_owners_in(o);
+    if (o->owned_count > 0)
+        unbound_owner_counts[oid] += o->owned_count;
+    if (o->anon_owner)
+        unbound_anon_owners.insert(oid);
+    o->owned_count = 0;
+    o->anon_owner = false;
+
     objects[oid] = nullptr;
     db_set_last_used_objid(last);
 
     o->id = NOTHING;
     o->anonymous_storage = true;
+    if (was_permanent)
+        ref_owners_in(o);
 
     free_var(o->children);
     free_var(o->location);
@@ -601,6 +689,24 @@ is_valid(Var obj)
     return (TYPE_ANON == obj.type) ?
            anon_valid(obj.v.anon) :
            valid(obj.v.obj);
+}
+
+/* How many owner fields of permanent objects name TARGET. */
+static Num
+count_owner_fields_naming(Objid target)
+{
+    Num n = 0;
+    for (Objid oid = 0; oid < num_objects; oid++) {
+        Object *o = objects[oid];
+        if (!o || o->anonymous_storage)
+            continue;
+        n += (o->owner == target);
+        for (Verbdef *v = o->verbdefs; v; v = v->next)
+            n += (v->owner == target);
+        for (unsigned int i = 0; i < o->nval; i++)
+            n += (o->propval[i].owner == target);
+    }
+    return n;
 }
 
 Objid
@@ -755,6 +861,21 @@ db_renumber_object(Objid old)
                                 p[i].owner = _new;
                     }
                 }
+            }
+
+            /* Owner fields that named the free number _NEW are now NOTHING and
+             * those that named OLD name _NEW, so recount _NEW. Anonymous
+             * objects' verb owners were not rewritten and may still name
+             * OLD, so OLD keeps an anonymous mark if the object had one. */
+            {
+                bool anon_marked = o->anon_owner || unbound_anon_owners.count(_new);
+                unbound_owner_counts.erase(_new);
+                unbound_owner_counts.erase(old);
+                unbound_anon_owners.erase(_new);
+                if (o->anon_owner)
+                    unbound_anon_owners.insert(old);
+                o->owned_count = count_owner_fields_naming(_new);
+                o->anon_owner = anon_marked;
             }
 
             return _new;
@@ -986,8 +1107,9 @@ dbpriv_object_owner(Object *o)
 void
 dbpriv_set_object_owner(Object *o, Objid owner)
 {
+    db_owner_unref(o, o->owner);
     o->owner = owner;
-    db_note_owner(owner);
+    db_owner_ref(o, owner);
 }
 
 Objid
@@ -1494,6 +1616,12 @@ db_fixup_owners(const Objid obj)
     for (const auto& x : anonymous_objects)
         for (const auto& y : x.second)
             do_fixup_owners(y, obj);
+
+    /* Every owner field the scan reaches that named OBJ is now NOTHING. */
+    if (owner_object(obj)) {
+        objects[obj]->owned_count = 0;
+        objects[obj]->anon_owner = false;
+    }
 }
 
 void
