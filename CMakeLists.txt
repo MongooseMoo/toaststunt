@@ -310,6 +310,27 @@ endif()
 if(SQLITE3_FOUND)
     include_directories(${SQLITE3_INCLUDE_DIR})
     target_link_libraries(moo ${SQLITE3_LIBRARIES})
+
+    # sqlite-vec (vector search) compiled into the server from its release
+    # amalgamation, pinned by version and sha256. register_sqlite() makes it
+    # available on every connection sqlite_open() makes.
+    set(SQLITE_VEC_VERSION 0.1.9)
+    set(SQLITE_VEC_SHA256 3acd67cb4aff080c7050926fd3cf8227905fe5b7ee3829d8ee5024ab1283cf61)
+    set(SQLITE_VEC_DIR ${CMAKE_BINARY_DIR}/sqlite-vec-${SQLITE_VEC_VERSION})
+    file(DOWNLOAD
+        https://github.com/asg017/sqlite-vec/releases/download/v${SQLITE_VEC_VERSION}/sqlite-vec-${SQLITE_VEC_VERSION}-amalgamation.tar.gz
+        ${SQLITE_VEC_DIR}.tar.gz
+        EXPECTED_HASH SHA256=${SQLITE_VEC_SHA256})
+    file(MAKE_DIRECTORY ${SQLITE_VEC_DIR})
+    execute_process(COMMAND ${CMAKE_COMMAND} -E tar xzf ${SQLITE_VEC_DIR}.tar.gz
+        WORKING_DIRECTORY ${SQLITE_VEC_DIR}
+        RESULT_VARIABLE SQLITE_VEC_EXTRACT)
+    if(NOT SQLITE_VEC_EXTRACT EQUAL 0)
+        message(FATAL_ERROR "Could not extract ${SQLITE_VEC_DIR}.tar.gz")
+    endif()
+    target_sources(moo PRIVATE ${SQLITE_VEC_DIR}/sqlite-vec.c)
+    target_include_directories(moo PRIVATE ${SQLITE_VEC_DIR})
+    target_compile_definitions(moo PRIVATE SQLITE_CORE SQLITE_VEC_STATIC)
 endif()
 
 if(OPENSSL_FOUND)
