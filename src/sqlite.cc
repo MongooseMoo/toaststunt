@@ -4,6 +4,7 @@
 
 #include <unordered_map>
 
+#include "sqlite-vec.h"
 #include "sqlite.h"
 #include "background.h"
 #include "functions.h"
@@ -660,6 +661,12 @@ register_sqlite() {
     } else {
         applog(LOG_WARNING, "SQLite is not compiled to be thread-safe. BEWARE!");
     }
+
+    // Every connection opened from here on gets sqlite-vec's functions and vec0 tables.
+    if (sqlite3_auto_extension((void (*)(void))sqlite3_vec_init) != SQLITE_OK)
+        errlog("REGISTER_SQLITE: Could not register sqlite-vec %s\n", SQLITE_VEC_VERSION);
+    else
+        oklog("REGISTER_SQLITE: Using sqlite-vec %s\n", SQLITE_VEC_VERSION);
 
     register_function("sqlite_open", 1, 2, bf_sqlite_open, TYPE_STR, TYPE_INT);
     register_function("sqlite_close", 1, 1, bf_sqlite_close, TYPE_INT);
