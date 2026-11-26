@@ -763,11 +763,6 @@ bf_curl(Var arglist, Byte next, void *vdata, Objid progr)
 static package
 bf_url_encode(Var arglist, Byte next, void *vdata, Objid progr)
 {
-    if (!outbound_network_enabled) {
-        free_var(arglist);
-        return make_raise_pack(E_PERM, "Outbound network connections are disabled.", zero);
-    }
-
     Var r;
     const char *url = arglist.v.list[1].v.str;
 
@@ -790,11 +785,6 @@ bf_url_encode(Var arglist, Byte next, void *vdata, Objid progr)
 static package
 bf_url_decode(Var arglist, Byte next, void *vdata, Objid progr)
 {
-    if (!outbound_network_enabled) {
-        free_var(arglist);
-        return make_raise_pack(E_PERM, "Outbound network connections are disabled.", zero);
-    }
-
     Var r;
     const char *url = arglist.v.list[1].v.str;
 
@@ -816,24 +806,19 @@ bf_url_decode(Var arglist, Byte next, void *vdata, Objid progr)
 
 void curl_shutdown(void)
 {
-    if (outbound_network_enabled)
-    {
-        curl_global_cleanup();
-
-        if (curl_handle != nullptr)
-            curl_easy_cleanup(curl_handle);
-    }
+    if (curl_handle != nullptr)
+        curl_easy_cleanup(curl_handle);
+    curl_global_cleanup();
 }
 
 void
 register_curl(void)
 {
-    if (outbound_network_enabled)
-    {
-        oklog("REGISTER_CURL: Using libcurl version %s\n", curl_version());
-        curl_global_init(CURL_GLOBAL_ALL);
-        curl_handle = curl_easy_init();
-    }
+    /* url_encode() and url_decode() use this handle and work with outbound
+     * networking off; only curl() itself checks outbound_network_enabled. */
+    oklog("REGISTER_CURL: Using libcurl version %s\n", curl_version());
+    curl_global_init(CURL_GLOBAL_ALL);
+    curl_handle = curl_easy_init();
 
     register_function("curl", 1, 3, bf_curl, TYPE_STR, TYPE_ANY, TYPE_INT);
     register_function("url_encode", 1, 1, bf_url_encode, TYPE_STR);
