@@ -44,3 +44,5 @@ jobs:
         run: python3 test/run_map_order_regressions.py build/moo --test test_owner_count.rb
       - name: Verify sqlite-vec on every SQLite connection
         run: python3 test/run_map_order_regressions.py build/moo --test test_sqlite_vec.rb
+      - name: Verify url_encode and url_decode with outbound networking off
+        run: python3 test/run_map_order_regressions.py build/moo --test test_url_builtins.rb
